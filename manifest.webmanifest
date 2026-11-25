@@ -1,0 +1,13 @@
+{
+  "name": "Sisyphus",
+  "short_name": "Sisyphus",
+  "description": "A workout tracker that follows a fixed weekly schedule.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F3F0EA",
+  "theme_color": "#F3F0EA",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
