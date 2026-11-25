@@ -1,5 +1,6 @@
-// Offline support: serve the app shell from cache, refresh it in the background.
-const CACHE = 'sisyphus-v1';
+// Offline support. Network first, so a new deploy is picked up on the next
+// open; the cache is only used when the network is unavailable.
+const CACHE = 'sisyphus-v2';
 const SHELL = [
   './',
   './index.html',
@@ -14,7 +15,12 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches
+      .open(CACHE)
+      .then((c) => c.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -24,19 +30,19 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
+  const req = e.request;
+  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   e.respondWith(
-    caches.match(e.request).then((cached) => {
-      const network = fetch(e.request)
-        .then((res) => {
-          if (res.ok && (res.type === 'basic' || res.type === 'cors')) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, copy));
-          }
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    // "no-cache" makes the browser check with the server instead of reusing
+    // its own HTTP cache, which GitHub Pages lets it keep for 10 minutes.
+    fetch(req, { cache: 'no-cache' })
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req, { ignoreSearch: true }))
   );
 });

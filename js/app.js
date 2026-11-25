@@ -7,20 +7,40 @@ const STORAGE_KEY = 'sisyphus.v1';
 // ---- Persistence ------------------------------------------------------------
 
 function load() {
-  const empty = { schedule: null, progress: core.freshProgress(), active: null, log: [] };
+  const empty = { schedule: null, scheduleSource: null, progress: core.freshProgress(), active: null, log: [] };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return empty;
     const d = JSON.parse(raw);
-    return {
+    const out = {
       schedule: d.schedule || null,
+      scheduleSource: typeof d.scheduleSource === 'string' ? d.scheduleSource : null,
       progress: d.progress || core.freshProgress(),
       active: d.active || null,
       log: Array.isArray(d.log) ? d.log : [],
     };
+    // Re-read the imported file so fixes and new features in the parser
+    // apply to schedules imported with an older version of the app.
+    if (out.scheduleSource) {
+      try { out.schedule = core.parseSchedule(out.scheduleSource); } catch { /* keep the saved copy */ }
+    }
+    if (out.schedule && out.active) out.active = repairSession(out.schedule, out.active, out.log);
+    return out;
   } catch {
     return empty;
   }
+}
+
+/** A workout started under an older version may have the wrong exercise type; rebuild those exercises. */
+function repairSession(schedule, active, log) {
+  try {
+    const fresh = core.startSession(schedule, { week: active.week, completed: [] }, active.dayIndex, log);
+    active.exercises = active.exercises.map((ex, i) => {
+      const f = fresh.exercises[i];
+      return f && f.name === ex.name && core.typeOf(ex) !== f.type ? f : ex;
+    });
+  } catch { /* leave it as it was */ }
+  return active;
 }
 
 function save() {
@@ -46,8 +66,9 @@ function toast(msg) {
   toastTimer = setTimeout(() => { ui.toast = null; render(); }, 2600);
 }
 
-function setSchedule(schedule, label) {
+function setSchedule(schedule, label, source = null) {
   data.schedule = schedule;
+  data.scheduleSource = source;
   data.progress = core.freshProgress();
   data.active = null;
   save();
@@ -65,7 +86,7 @@ function importText(text) {
     return;
   }
   if (data.schedule && !confirm(`Replace "${data.schedule.name}" with "${schedule.name}"?\n\nYou will start again at week 1. Your log is kept.`)) return;
-  setSchedule(schedule, `"${schedule.name}"`);
+  setSchedule(schedule, `"${schedule.name}"`, text);
 }
 
 function download(filename, obj) {
@@ -366,7 +387,7 @@ const actions = {
     try {
       // The standalone build inlines the sample, since fetch() fails on file:// pages.
       const text = typeof SAMPLE_SCHEDULE === 'string' ? SAMPLE_SCHEDULE : await (await fetch('./sample-schedule.json')).text();
-      setSchedule(core.parseSchedule(text), 'Sample schedule');
+      setSchedule(core.parseSchedule(text), 'Sample schedule', text);
     } catch (e) {
       alert('Could not load the sample schedule: ' + e.message);
     }
@@ -417,7 +438,7 @@ const actions = {
   reset: () => {
     if (!confirm('Erase the schedule, your progress and the whole log from this device?')) return;
     if (!confirm('This cannot be undone. Erase everything?')) return;
-    data = { schedule: null, progress: core.freshProgress(), active: null, log: [] };
+    data = { schedule: null, scheduleSource: null, progress: core.freshProgress(), active: null, log: [] };
     save();
     ui.tab = 'workout';
   },
@@ -451,5 +472,14 @@ document.addEventListener('input', (e) => {
 render();
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  // When an update takes over, reload once so the new code runs right away.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
+  navigator.serviceWorker
+    .register('./sw.js', { updateViaCache: 'none' })
+    .then((reg) => reg.update())
+    .catch(() => {});
 }
