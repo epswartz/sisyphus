@@ -27,6 +27,8 @@ jobs:
         run: |
           mkdir _site
           cp -r index.html styles.css sw.js manifest.webmanifest icon.svg sample-schedule.json js _site/
+      - name: Stamp build number
+        run: sed -i "s/'dev'/'${{ github.run_number }} · ${GITHUB_SHA::7}'/" _site/js/version.js && cat _site/js/version.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
 

@@ -133,6 +133,7 @@ details.card > summary { list-style: none; display: flex; justify-content: space
 details.card > summary::-webkit-details-marker { display: none; }
 .sched-day { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
 .actions { margin-top: 24px; }
+.build { font-variant-numeric: tabular-nums; }
 .format { margin-top: 20px; }
 .format summary { cursor: pointer; color: var(--muted); font-size: 14px; min-height: 44px; display: flex; align-items: center; }
 
@@ -167,6 +168,8 @@ details.card > summary::-webkit-details-marker { display: none; }
 <script>
 (() => {
 const SAMPLE_SCHEDULE = "{\n  \"name\": \"Push Pull Legs\",\n  \"unit\": \"kg\",\n  \"weeks\": [\n    {\n      \"name\": \"Base week\",\n      \"days\": [\n        {\n          \"name\": \"Push\",\n          \"exercises\": [\n            { \"name\": \"Bench press\", \"sets\": 3, \"reps\": 8, \"weight\": 60 },\n            { \"name\": \"Overhead press\", \"sets\": 3, \"reps\": 8, \"weight\": 35 },\n            { \"name\": \"Dips\", \"sets\": 2, \"reps\": \"10-12\", \"notes\": \"Bodyweight\" }\n          ]\n        },\n        {\n          \"name\": \"Pull\",\n          \"exercises\": [\n            { \"name\": \"Deadlift\", \"sets\": 3, \"reps\": 5, \"weight\": 100 },\n            { \"name\": \"Pull-ups\", \"sets\": 3, \"reps\": \"6-8\" },\n            { \"name\": \"Barbell row\", \"sets\": 3, \"reps\": 8, \"weight\": 50 }\n          ]\n        },\n        {\n          \"name\": \"Legs\",\n          \"exercises\": [\n            { \"name\": \"Squat\", \"sets\": 3, \"reps\": 6, \"weight\": 80 },\n            { \"name\": \"Romanian deadlift\", \"sets\": 3, \"reps\": 10, \"weight\": 60 },\n            { \"name\": \"Calf raise\", \"sets\": 3, \"reps\": 15 }\n          ]\n        }\n      ]\n    },\n    {\n      \"name\": \"Heavy week\",\n      \"days\": [\n        {\n          \"name\": \"Push\",\n          \"exercises\": [\n            { \"name\": \"Bench press\", \"sets\": 5, \"reps\": 5, \"weight\": 65 },\n            { \"name\": \"Overhead press\", \"sets\": 4, \"reps\": 5, \"weight\": 37.5 }\n          ]\n        },\n        {\n          \"name\": \"Pull\",\n          \"exercises\": [\n            { \"name\": \"Deadlift\", \"sets\": 5, \"reps\": 3, \"weight\": 110 },\n            { \"name\": \"Pull-ups\", \"sets\": 4, \"reps\": \"5\" }\n          ]\n        },\n        {\n          \"name\": \"Legs\",\n          \"exercises\": [\n            { \"name\": \"Squat\", \"sets\": 5, \"reps\": 5, \"weight\": 85 },\n            { \"name\": \"Calf raise\", \"sets\": 3, \"reps\": 15 }\n          ]\n        }\n      ]\n    }\n  ]\n}\n";
+
+const BUILD = "local · 7e476a0";
 
 const core = (() => {
 // Pure logic: schedule parsing, week/day progress, sessions and the log.
@@ -536,6 +539,7 @@ const icons = {
 
 
 
+
 const STORAGE_KEY = 'sisyphus.v1';
 
 // ---- Persistence ------------------------------------------------------------
@@ -866,7 +870,10 @@ function viewSchedule() {
   <div class="stack actions">
     ${importButton('Import a new schedule', 'btn wide')}
     <button class="btn wide" data-action="export">Export my data</button>
-    <button class="btn text wide danger" data-action="reset">Erase everything</button>
+    <div class="row between">
+      <button class="btn text danger" data-action="reset">Erase everything</button>
+      <span class="build muted small">Build ${esc(BUILD)}</span>
+    </div>
   </div>
   <details class="format"><summary>Schedule format</summary>${formatHelp()}</details>`;
 }

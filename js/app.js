@@ -1,5 +1,6 @@
 import * as core from './core.js';
 import { bust, column, icons } from './art.js';
+import { BUILD } from './version.js';
 
 const STORAGE_KEY = 'sisyphus.v1';
 
@@ -331,7 +332,10 @@ function viewSchedule() {
   <div class="stack actions">
     ${importButton('Import a new schedule', 'btn wide')}
     <button class="btn wide" data-action="export">Export my data</button>
-    <button class="btn text wide danger" data-action="reset">Erase everything</button>
+    <div class="row between">
+      <button class="btn text danger" data-action="reset">Erase everything</button>
+      <span class="build muted small">Build ${esc(BUILD)}</span>
+    </div>
   </div>
   <details class="format"><summary>Schedule format</summary>${formatHelp()}</details>`;
 }

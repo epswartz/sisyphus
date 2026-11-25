@@ -2,6 +2,7 @@
 // disk (file://), where ES modules, fetch() and service workers do not work.
 // Usage: node scripts/build-standalone.mjs   →  standalone/sisyphus.html
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 
 const root = new URL('../', import.meta.url);
 const read = (p) => readFileSync(new URL(p, root), 'utf8');
@@ -12,12 +13,15 @@ const exportedNames = (src) => [...src.matchAll(/^export (?:class|function|const
 const coreSrc = read('js/core.js');
 const core = `const core = (() => {\n${stripExports(coreSrc)}\nreturn { ${exportedNames(coreSrc).join(', ')} };\n})();`;
 const art = stripExports(read('js/art.js'));
+let commit = '';
+try { commit = execSync('git rev-parse --short HEAD', { cwd: root }).toString().trim(); } catch {}
+const version = `const BUILD = ${JSON.stringify(commit ? `local · ${commit}` : 'local')};`;
 const app = read('js/app.js')
   .replace(/^import .*$/gm, '')
   .replace(/if \('serviceWorker' in navigator[\s\S]*$/, '');
 const sample = `const SAMPLE_SCHEDULE = ${JSON.stringify(read('sample-schedule.json'))};`;
 
-const scriptBody = [sample, core, art, app].join('\n\n').replace(/<\/script/gi, '<\\/script');
+const scriptBody = [sample, version, core, art, app].join('\n\n').replace(/<\/script/gi, '<\\/script');
 const iconData = 'data:image/svg+xml,' + encodeURIComponent(read('icon.svg').trim());
 
 const html = read('index.html')
