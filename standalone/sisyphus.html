@@ -100,6 +100,7 @@ pre { margin: 10px 0 0; padding: 12px; background: var(--field); border: 1px sol
 
 /* Sets */
 .set { display: grid; grid-template-columns: 22px minmax(0, 1fr) 14px minmax(0, 1fr) 44px; align-items: center; gap: 8px; min-height: 50px; border-top: 1px solid var(--line-soft); }
+.set.single { grid-template-columns: 22px minmax(0, 1fr) 44px; }
 .set.head-row { min-height: 0; margin-top: 10px; padding-bottom: 4px; border-top: 0; }
 .set-n { font-size: 12px; color: var(--muted); }
 .set input {
@@ -189,6 +190,7 @@ function parseSchedule(input) {
   }
   if (!isObj(data)) fail('The schedule must be a JSON object.');
   const unit = str(data.unit) || 'kg';
+  const distanceUnit = str(data.distanceUnit) || 'mi';
   let weeks;
   if (Array.isArray(data.weeks)) weeks = data.weeks;
   else if (Array.isArray(data.days)) weeks = [{ days: data.days }];
@@ -197,40 +199,82 @@ function parseSchedule(input) {
   return {
     name: str(data.name) || 'My schedule',
     unit,
-    weeks: weeks.map((w, wi) => normWeek(w, wi, unit)),
+    distanceUnit,
+    weeks: weeks.map((w, wi) => normWeek(w, wi, { unit, distanceUnit })),
   };
 }
 
-function normWeek(w, wi, unit) {
+function normWeek(w, wi, units) {
   const where = `Week ${wi + 1}`;
   if (!isObj(w)) fail(`${where} must be an object with a "days" list.`);
   if (!Array.isArray(w.days) || !w.days.length) fail(`${where} needs a non-empty "days" list.`);
-  return { name: str(w.name) || where, days: w.days.map((d, di) => normDay(d, di, where, unit)) };
+  return { name: str(w.name) || where, days: w.days.map((d, di) => normDay(d, di, where, units)) };
 }
 
-function normDay(d, di, weekWhere, unit) {
+function normDay(d, di, weekWhere, units) {
   const where = `${weekWhere}, day ${di + 1}`;
   if (!isObj(d)) fail(`${where} must be an object.`);
   const name = str(d.name) || `Day ${di + 1}`;
   if (!Array.isArray(d.exercises) || !d.exercises.length) fail(`${where} ("${name}") needs a non-empty "exercises" list.`);
-  return { name, exercises: d.exercises.map((e, ei) => normExercise(e, ei, `${where} ("${name}")`, unit)) };
+  return { name, exercises: d.exercises.map((e, ei) => normExercise(e, ei, `${where} ("${name}")`, units)) };
 }
 
-function normExercise(e, ei, dayWhere, unit) {
+const TYPES = ['weight', 'distance', 'time'];
+
+function normExercise(e, ei, dayWhere, units) {
   const where = `${dayWhere}, exercise ${ei + 1}`;
   if (!isObj(e)) fail(`${where} must be an object.`);
   const name = str(e.name);
   if (!name) fail(`${where} needs a "name".`);
-  let sets = e.sets === undefined ? 3 : e.sets;
-  if (!Number.isInteger(sets) || sets < 1 || sets > 50) fail(`${where} ("${name}"): "sets" must be a whole number from 1 to 50.`);
-  let reps = e.reps === undefined ? null : e.reps;
-  if (reps !== null && !((typeof reps === 'number' && reps > 0) || (typeof reps === 'string' && reps.trim()))) {
-    fail(`${where} ("${name}"): "reps" must be a number or text like "8-10".`);
+  const label = `${where} ("${name}")`;
+  const type = str(e.type) || 'weight';
+  if (!TYPES.includes(type)) fail(`${label}: "type" must be one of ${TYPES.map((t) => `"${t}"`).join(', ')}.`);
+
+  const sets = e.sets === undefined ? (type === 'weight' ? 3 : 1) : e.sets;
+  if (!Number.isInteger(sets) || sets < 1 || sets > 50) fail(`${label}: "sets" must be a whole number from 1 to 50.`);
+  const positive = (key) => {
+    const v = e[key] === undefined || e[key] === null ? null : e[key];
+    if (v !== null && !(typeof v === 'number' && v > 0)) fail(`${label}: "${key}" must be a number above 0.`);
+    return v;
+  };
+  const out = { name, type, sets, reps: null, weight: null, distance: null, seconds: null, unit: '', notes: str(e.notes) };
+
+  if (type === 'distance') {
+    out.distance = positive('distance');
+    out.unit = str(e.unit) || units.distanceUnit;
+  } else if (type === 'time') {
+    out.seconds = positive('seconds');
+  } else {
+    let reps = e.reps === undefined ? null : e.reps;
+    if (reps !== null && !((typeof reps === 'number' && reps > 0) || (typeof reps === 'string' && reps.trim()))) {
+      fail(`${label}: "reps" must be a number or text like "8-10".`);
+    }
+    out.reps = typeof reps === 'string' ? reps.trim() : reps;
+    const weight = e.weight === undefined || e.weight === null ? null : e.weight;
+    if (weight !== null && !(typeof weight === 'number' && weight >= 0)) fail(`${label}: "weight" must be a number.`);
+    out.weight = weight;
+    out.unit = str(e.unit) || units.unit;
   }
-  if (typeof reps === 'string') reps = reps.trim();
-  const weight = e.weight === undefined || e.weight === null ? null : e.weight;
-  if (weight !== null && !(typeof weight === 'number' && weight >= 0)) fail(`${where} ("${name}"): "weight" must be a number.`);
-  return { name, sets, reps, weight, unit: str(e.unit) || unit, notes: str(e.notes) };
+  return out;
+}
+
+// ---- Durations --------------------------------------------------------------
+
+/** "1:30" → 90, "1:02:03" → 3723, "45" → 45 (plain numbers are seconds). */
+function parseDuration(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return null;
+  if (!/^\d+(\.\d+)?$|^\d+(:\d{1,2}){1,2}$/.test(t)) return null;
+  return Math.round(t.split(':').reduce((acc, part) => acc * 60 + Number(part), 0));
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return '';
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
 
 // ---- Progress through the weeks ------------------------------------------
@@ -259,6 +303,9 @@ function completeDay(schedule, progress, dayIndex) {
 
 // ---- Sessions ---------------------------------------------------------------
 
+/** Exercises saved before types existed are weight exercises. */
+const typeOf = (ex) => (ex && ex.type) || 'weight';
+
 const leadingNumber = (reps) => {
   if (typeof reps === 'number') return reps;
   const m = typeof reps === 'string' ? reps.match(/\d+/) : null;
@@ -266,12 +313,19 @@ const leadingNumber = (reps) => {
 };
 
 /** Sets from the most recent logged session that included this exercise. */
-function lastSetsFor(log, name) {
+function lastSetsFor(log, name, type = 'weight') {
   for (let i = log.length - 1; i >= 0; i--) {
-    const ex = log[i].exercises.find((x) => x.name === name);
+    const ex = log[i].exercises.find((x) => x.name === name && typeOf(x) === type);
     if (ex && ex.sets.length) return ex.sets;
   }
   return null;
+}
+
+/** The editable values a new set starts with. Inputs hold text, so time is "m:ss". */
+function prefillSet(ex, prev) {
+  if (ex.type === 'distance') return { distance: ex.distance !== null ? ex.distance : prev ? prev.distance ?? '' : '', done: false };
+  if (ex.type === 'time') return { time: formatDuration(ex.seconds !== null ? ex.seconds : prev ? prev.seconds : null), done: false };
+  return { weight: ex.weight !== null ? ex.weight : prev ? prev.weight ?? '' : '', reps: leadingNumber(ex.reps), done: false };
 }
 
 function startSession(schedule, progress, dayIndex, log, now = Date.now()) {
@@ -281,23 +335,37 @@ function startSession(schedule, progress, dayIndex, log, now = Date.now()) {
     dayIndex,
     dayName: day.name,
     startedAt: now,
-    exercises: day.exercises.map((ex) => {
-      const last = lastSetsFor(log, ex.name);
+    exercises: day.exercises.map((raw) => {
+      const ex = { ...raw, type: typeOf(raw) };
+      const last = lastSetsFor(log, ex.name, ex.type);
       const sets = [];
-      for (let i = 0; i < ex.sets; i++) {
-        const prev = last ? last[Math.min(i, last.length - 1)] : null;
-        sets.push({
-          weight: ex.weight !== null ? ex.weight : prev ? prev.weight : '',
-          reps: leadingNumber(ex.reps),
-          done: false,
-        });
-      }
-      return { name: ex.name, unit: ex.unit, notes: ex.notes, target: { sets: ex.sets, reps: ex.reps, weight: ex.weight }, last, sets };
+      for (let i = 0; i < ex.sets; i++) sets.push(prefillSet(ex, last ? last[Math.min(i, last.length - 1)] : null));
+      return {
+        name: ex.name,
+        type: ex.type,
+        unit: ex.unit,
+        notes: ex.notes,
+        target: { sets: ex.sets, reps: ex.reps, weight: ex.weight, distance: ex.distance, seconds: ex.seconds },
+        last,
+        sets,
+      };
     }),
   };
 }
 
+/** A copy of the set before it, for "+ Add set". */
+function nextSet(ex) {
+  const prev = ex.sets[ex.sets.length - 1];
+  return prev ? { ...prev, done: false } : prefillSet({ ...ex.target, type: typeOf(ex) }, null);
+}
+
 const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
+
+function loggedSet(set, type) {
+  if (type === 'distance') return { distance: num(set.distance) };
+  if (type === 'time') return { seconds: parseDuration(set.time) };
+  return { weight: num(set.weight), reps: num(set.reps) };
+}
 
 /** Turn an in-progress session into a log entry holding only the checked sets. */
 function finishSession(session, now = Date.now()) {
@@ -311,8 +379,9 @@ function finishSession(session, now = Date.now()) {
     exercises: session.exercises
       .map((ex) => ({
         name: ex.name,
+        type: typeOf(ex),
         unit: ex.unit,
-        sets: ex.sets.filter((s) => s.done).map((s) => ({ weight: num(s.weight), reps: num(s.reps) })),
+        sets: ex.sets.filter((s) => s.done).map((s) => loggedSet(s, typeOf(ex))),
       }))
       .filter((ex) => ex.sets.length),
   };
@@ -325,58 +394,96 @@ const doneSetCount = (session) => session.exercises.reduce((n, ex) => n + ex.set
 const entrySetCount = (entry) => entry.exercises.reduce((n, ex) => n + ex.sets.length, 0);
 
 const entryVolume = (entry) =>
-  entry.exercises.reduce((v, ex) => v + ex.sets.reduce((s, set) => s + (set.weight || 0) * (set.reps || 0), 0), 0);
+  entry.exercises
+    .filter((ex) => typeOf(ex) === 'weight')
+    .reduce((v, ex) => v + ex.sets.reduce((s, set) => s + (set.weight || 0) * (set.reps || 0), 0), 0);
 
-/** Heaviest set (ties broken by reps). */
-function bestSet(sets) {
+/** Totals worth showing for a session, e.g. ["1,260 kg", "1.5 mi", "3:00"]. */
+function entryTotals(entry) {
+  const out = [];
+  const byUnit = new Map();
+  let seconds = 0;
+  for (const ex of entry.exercises) {
+    const type = typeOf(ex);
+    for (const set of ex.sets) {
+      if (type === 'weight') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.weight || 0) * (set.reps || 0));
+      else if (type === 'distance') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.distance || 0));
+      else seconds += set.seconds || 0;
+    }
+  }
+  for (const [unit, total] of byUnit) if (total) out.push(`${round2(total).toLocaleString()} ${unit}`);
+  if (seconds) out.push(formatDuration(seconds));
+  return out;
+}
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/** The best set: heaviest (then most reps), furthest, or longest. */
+function bestSet(sets, type = 'weight') {
   let best = null;
+  const better = {
+    weight: (a, b) => (a.weight || 0) > (b.weight || 0) || ((a.weight || 0) === (b.weight || 0) && (a.reps || 0) > (b.reps || 0)),
+    distance: (a, b) => (a.distance || 0) > (b.distance || 0),
+    time: (a, b) => (a.seconds || 0) > (b.seconds || 0),
+  }[type];
   for (const s of sets) {
-    if (s.weight === null && s.reps === null) continue;
-    if (!best || (s.weight || 0) > (best.weight || 0) || ((s.weight || 0) === (best.weight || 0) && (s.reps || 0) > (best.reps || 0))) best = s;
+    const empty = type === 'weight' ? s.weight === null && s.reps === null : type === 'distance' ? s.distance === null : s.seconds === null;
+    if (empty) continue;
+    if (!best || better(s, best)) best = s;
   }
   return best;
 }
 
-/** One row per exercise name in the log, most recently done first. */
+/** One row per exercise in the log, most recently done first. */
 function exerciseSummaries(log) {
   const map = new Map();
   log.forEach((entry, i) => {
     for (const ex of entry.exercises) {
-      const row = map.get(ex.name) || { name: ex.name, unit: ex.unit, sessions: 0, sets: [], lastIndex: -1 };
+      const type = typeOf(ex);
+      const key = `${type}:${ex.name}`;
+      const row = map.get(key) || { name: ex.name, type, unit: ex.unit, sessions: 0, sets: [], lastIndex: -1 };
       row.sessions++;
       row.sets.push(...ex.sets);
       row.lastIndex = i;
       row.unit = ex.unit;
-      map.set(ex.name, row);
+      map.set(key, row);
     }
   });
   return [...map.values()]
     .sort((a, b) => b.lastIndex - a.lastIndex)
-    .map(({ name, unit, sessions, sets }) => ({ name, unit, sessions, best: bestSet(sets) }));
+    .map(({ name, type, unit, sessions, sets }) => ({ name, type, unit, sessions, best: bestSet(sets, type) }));
 }
 
 /** Every logged session of one exercise, newest first. */
-function exerciseHistory(log, name) {
+function exerciseHistory(log, name, type = 'weight') {
   const out = [];
   for (let i = log.length - 1; i >= 0; i--) {
-    const ex = log[i].exercises.find((x) => x.name === name);
-    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, unit: ex.unit, sets: ex.sets });
+    const ex = log[i].exercises.find((x) => x.name === name && typeOf(x) === type);
+    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, type, unit: ex.unit, sets: ex.sets });
   }
   return out;
 }
 
-const formatSet = (s) => {
+/** "60×8" (weights), "1.2 mi" (distance), "1:30" (time). */
+function formatSet(s, type = 'weight', unit = '') {
+  if (type === 'distance') return s.distance === null ? '—' : `${round2(s.distance)}${unit ? ' ' + unit : ''}`;
+  if (type === 'time') return s.seconds === null ? '—' : formatDuration(s.seconds);
   if (s.weight === null || s.weight === 0) return s.reps === null ? '—' : `${s.reps}`;
   return `${s.weight}×${s.reps === null ? '?' : s.reps}`;
-};
+}
 
-function formatTarget(t, unit) {
+/** The target as written in the schedule, e.g. "3 × 8 · 60 kg", "0.5 mi", "3 × 0:45". */
+function formatTarget(t, unit, type = 'weight') {
+  if (type === 'distance' || type === 'time') {
+    const each = type === 'distance' ? (t.distance === null ? 'any distance' : `${t.distance} ${unit}`) : t.seconds === null ? 'any time' : formatDuration(t.seconds);
+    return t.sets > 1 ? `${t.sets} × ${each}` : each;
+  }
   let out = `${t.sets} ×${t.reps === null ? ' ?' : ' ' + t.reps}`;
   if (t.weight !== null) out += ` · ${t.weight} ${unit}`;
   return out;
 }
 
-return { ScheduleError, parseSchedule, freshProgress, templateWeek, nextDayIndex, completeDay, lastSetsFor, startSession, finishSession, doneSetCount, entrySetCount, entryVolume, bestSet, exerciseSummaries, exerciseHistory, formatSet, formatTarget };
+return { ScheduleError, parseSchedule, TYPES, parseDuration, formatDuration, freshProgress, templateWeek, nextDayIndex, completeDay, typeOf, lastSetsFor, startSession, nextSet, finishSession, doneSetCount, entrySetCount, entryVolume, entryTotals, bestSet, exerciseSummaries, exerciseHistory, formatSet, formatTarget };
 })();
 
 // Marble illustrations as inline SVG strings.
@@ -464,7 +571,7 @@ const ui = { tab: 'workout', logView: 'sessions', exercise: null, openEntry: nul
 // ---- Helpers ----------------------------------------------------------------
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmtNum = (n) => Math.round(n).toLocaleString();
+const bestLabel = (set, type, unit) => (set ? ` · best ${esc(core.formatSet(set, type, unit))}${type === 'weight' && set.weight ? ' ' + esc(unit) : ''}` : '');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 let toastTimer;
 function toast(msg) {
@@ -530,7 +637,7 @@ function viewWelcome() {
 }
 
 function formatHelp() {
-  return `<p class="muted small">Each week lists its days, and each day lists its exercises. With several weeks they run in order and then repeat. <code>weight</code> and <code>notes</code> are optional, and <code>reps</code> can be text like "8-10".</p>
+  return `<p class="muted small">Each week lists its days, and each day lists its exercises. With several weeks they run in order and then repeat. <code>weight</code> and <code>notes</code> are optional, and <code>reps</code> can be text like "8-10". For runs or holds, give an exercise <code>"type": "distance"</code> with a <code>distance</code>, or <code>"type": "time"</code> with <code>seconds</code>.</p>
 <pre>{
   "name": "My plan",
   "unit": "kg",
@@ -597,28 +704,37 @@ function viewSession() {
   const total = core.templateWeek(s, a.week).days.length;
   const exercises = a.exercises
     .map((ex, ei) => {
+      const type = core.typeOf(ex);
+      const field = (name, si, label, mode, placeholder = '—') =>
+        `<input aria-label="${esc(ex.name)} set ${si + 1} ${label}" inputmode="${mode}" data-field="${name}" data-ex="${ei}" data-set="${si}" value="${esc(ex.sets[si][name] ?? '')}" placeholder="${placeholder}">`;
       const rows = ex.sets
-        .map(
-          (set, si) => `
-        <div class="set ${set.done ? 'is-done' : ''}">
+        .map((set, si) => {
+          const inputs =
+            type === 'distance' ? field('distance', si, `distance (${ex.unit})`, 'decimal')
+            : type === 'time' ? field('time', si, 'time (minutes:seconds)', 'text', 'm:ss')
+            : `${field('weight', si, `weight (${ex.unit})`, 'decimal')}<span class="muted">×</span>${field('reps', si, 'reps', 'numeric')}`;
+          return `
+        <div class="set ${type === 'weight' ? '' : 'single'} ${set.done ? 'is-done' : ''}">
           <span class="set-n">${si + 1}</span>
-          <input aria-label="${esc(ex.name)} set ${si + 1} weight (${esc(ex.unit)})" inputmode="decimal" data-field="weight" data-ex="${ei}" data-set="${si}" value="${esc(set.weight)}" placeholder="—">
-          <span class="muted">×</span>
-          <input aria-label="${esc(ex.name)} set ${si + 1} reps" inputmode="numeric" data-field="reps" data-ex="${ei}" data-set="${si}" value="${esc(set.reps)}" placeholder="—">
+          ${inputs}
           <button class="check" aria-label="Set ${si + 1} done" aria-pressed="${set.done}" data-action="toggle-set" data-ex="${ei}" data-set="${si}">${set.done ? icons.check : ''}</button>
-        </div>`
-        )
+        </div>`;
+        })
         .join('');
-      const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map(core.formatSet).join(' · ')}</p>` : '';
+      const head =
+        type === 'weight'
+          ? `<div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>`
+          : `<div class="set single head-row"><span></span><span class="small muted">${type === 'distance' ? esc(ex.unit) : 'Time'}</span><span></span></div>`;
+      const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map((x) => core.formatSet(x, type, ex.unit)).join(' · ')}</p>` : '';
       const notes = ex.notes ? `<p class="muted small">${esc(ex.notes)}</p>` : '';
       return `
       <article class="card">
         <div class="row between">
           <h3>${esc(ex.name)}</h3>
-          <span class="muted small">${esc(core.formatTarget(ex.target, ex.unit))}</span>
+          <span class="muted small">${esc(core.formatTarget(ex.target, ex.unit, type))}</span>
         </div>
         ${notes}${last}
-        <div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>
+        ${head}
         ${rows}
         <button class="btn text small" data-action="add-set" data-ex="${ei}">+ Add set</button>
       </article>`;
@@ -663,17 +779,16 @@ function viewSessions() {
     .reverse()
     .map((e) => {
       const open = ui.openEntry === e.id;
-      const vol = core.entryVolume(e);
-      const unit = e.exercises[0] ? e.exercises[0].unit : '';
+      const totals = core.entryTotals(e).map((t) => ` · ${esc(t)}`).join('');
       const detail = open
         ? `<div class="detail">${e.exercises
-            .map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map(core.formatSet).join(' · ')}</span></div>`)
+            .map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map((x) => core.formatSet(x, core.typeOf(ex), ex.unit)).join(' · ')}</span></div>`)
             .join('')}</div>`
         : '';
       return `
       <div class="item">
         <button class="item-btn" aria-expanded="${open}" data-action="toggle-entry" data-id="${esc(e.id)}">
-          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(e.exercises.length, 'exercise')} · ${plural(core.entrySetCount(e), 'set')}${vol ? ` · ${fmtNum(vol)} ${esc(unit)}` : ''}</span></span>
+          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(e.exercises.length, 'exercise')} · ${plural(core.entrySetCount(e), 'set')}${totals}</span></span>
           <span class="chev ${open ? 'open' : ''}">${icons.chevron}</span>
         </button>
         ${detail}
@@ -688,8 +803,8 @@ function viewExercises() {
     .map(
       (x) => `
     <div class="item">
-      <button class="item-btn" data-action="open-exercise" data-name="${esc(x.name)}">
-        <span><strong>${esc(x.name)}</strong><br><span class="muted small">${plural(x.sessions, 'session')}${x.best ? ` · best ${esc(core.formatSet(x.best))}${x.best.weight ? ' ' + esc(x.unit) : ''}` : ''}</span></span>
+      <button class="item-btn" data-action="open-exercise" data-name="${esc(x.name)}" data-type="${x.type}">
+        <span><strong>${esc(x.name)}</strong><br><span class="muted small">${plural(x.sessions, 'session')}${bestLabel(x.best, x.type, x.unit)}</span></span>
         <span class="chev">${icons.chevron}</span>
       </button>
     </div>`
@@ -698,15 +813,15 @@ function viewExercises() {
 }
 
 function viewExercise() {
-  const name = ui.exercise;
-  const hist = core.exerciseHistory(data.log, name);
-  const best = core.bestSet(hist.flatMap((h) => h.sets));
+  const { name, type } = ui.exercise;
+  const hist = core.exerciseHistory(data.log, name, type);
+  const best = core.bestSet(hist.flatMap((h) => h.sets), type);
   const unit = hist[0] ? hist[0].unit : '';
   return `
   <button class="btn text back" data-action="close-exercise">${icons.back} Log</button>
   <header class="head">
     <div>
-      <p class="eyebrow">${plural(hist.length, 'session')}${best ? ` · best ${esc(core.formatSet(best))}${best.weight ? ' ' + esc(unit) : ''}` : ''}</p>
+      <p class="eyebrow">${plural(hist.length, 'session')}${bestLabel(best, type, unit)}</p>
       <h1 class="display">${esc(name)}</h1>
     </div>
   </header>
@@ -715,7 +830,7 @@ function viewExercise() {
       (h) => `
     <div class="item static">
       <div class="row between"><strong>Week ${h.week} · ${esc(h.dayName)}</strong></div>
-      <div class="muted small">${h.sets.map(core.formatSet).join(' · ')}</div>
+      <div class="muted small">${h.sets.map((x) => core.formatSet(x, type, h.unit)).join(' · ')}</div>
     </div>`
     )
     .join('')}</div>`;
@@ -733,7 +848,7 @@ function viewSchedule() {
           (d) => `
         <div class="sched-day">
           <p class="label">${esc(d.name)}</p>
-          ${d.exercises.map((e) => `<div class="row between small"><span>${esc(e.name)}</span><span class="muted">${esc(core.formatTarget(e, e.unit))}</span></div>`).join('')}
+          ${d.exercises.map((e) => `<div class="row between small"><span>${esc(e.name)}</span><span class="muted">${esc(core.formatTarget(e, e.unit, core.typeOf(e)))}</span></div>`).join('')}
         </div>`
         )
         .join('')}
@@ -805,8 +920,7 @@ const actions = {
   },
   'add-set': (el) => {
     const ex = data.active.exercises[el.dataset.ex];
-    const prev = ex.sets[ex.sets.length - 1];
-    ex.sets.push({ weight: prev ? prev.weight : '', reps: prev ? prev.reps : '', done: false });
+    ex.sets.push(core.nextSet(ex));
     save();
   },
   finish: () => {
@@ -828,7 +942,7 @@ const actions = {
   },
   'log-view': (el) => { ui.logView = el.dataset.view; },
   'toggle-entry': (el) => { ui.openEntry = ui.openEntry === el.dataset.id ? null : el.dataset.id; },
-  'open-exercise': (el) => { ui.exercise = el.dataset.name; window.scrollTo(0, 0); },
+  'open-exercise': (el) => { ui.exercise = { name: el.dataset.name, type: el.dataset.type || 'weight' }; window.scrollTo(0, 0); },
   'close-exercise': () => { ui.exercise = null; ui.logView = 'exercises'; },
   export: () => download('sisyphus-data.json', { exportedAt: new Date().toISOString(), ...data }),
   reset: () => {
@@ -860,7 +974,8 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (!el.dataset.field || !data.active) return;
-  data.active.exercises[el.dataset.ex].sets[el.dataset.set][el.dataset.field] = el.value.replace(',', '.');
+  const field = el.dataset.field;
+  data.active.exercises[el.dataset.ex].sets[el.dataset.set][field] = field === 'time' ? el.value : el.value.replace(',', '.');
   save();
 });
 

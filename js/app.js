@@ -36,7 +36,7 @@ const ui = { tab: 'workout', logView: 'sessions', exercise: null, openEntry: nul
 // ---- Helpers ----------------------------------------------------------------
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmtNum = (n) => Math.round(n).toLocaleString();
+const bestLabel = (set, type, unit) => (set ? ` · best ${esc(core.formatSet(set, type, unit))}${type === 'weight' && set.weight ? ' ' + esc(unit) : ''}` : '');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 let toastTimer;
 function toast(msg) {
@@ -102,7 +102,7 @@ function viewWelcome() {
 }
 
 function formatHelp() {
-  return `<p class="muted small">Each week lists its days, and each day lists its exercises. With several weeks they run in order and then repeat. <code>weight</code> and <code>notes</code> are optional, and <code>reps</code> can be text like "8-10".</p>
+  return `<p class="muted small">Each week lists its days, and each day lists its exercises. With several weeks they run in order and then repeat. <code>weight</code> and <code>notes</code> are optional, and <code>reps</code> can be text like "8-10". For runs or holds, give an exercise <code>"type": "distance"</code> with a <code>distance</code>, or <code>"type": "time"</code> with <code>seconds</code>.</p>
 <pre>{
   "name": "My plan",
   "unit": "kg",
@@ -169,28 +169,37 @@ function viewSession() {
   const total = core.templateWeek(s, a.week).days.length;
   const exercises = a.exercises
     .map((ex, ei) => {
+      const type = core.typeOf(ex);
+      const field = (name, si, label, mode, placeholder = '—') =>
+        `<input aria-label="${esc(ex.name)} set ${si + 1} ${label}" inputmode="${mode}" data-field="${name}" data-ex="${ei}" data-set="${si}" value="${esc(ex.sets[si][name] ?? '')}" placeholder="${placeholder}">`;
       const rows = ex.sets
-        .map(
-          (set, si) => `
-        <div class="set ${set.done ? 'is-done' : ''}">
+        .map((set, si) => {
+          const inputs =
+            type === 'distance' ? field('distance', si, `distance (${ex.unit})`, 'decimal')
+            : type === 'time' ? field('time', si, 'time (minutes:seconds)', 'text', 'm:ss')
+            : `${field('weight', si, `weight (${ex.unit})`, 'decimal')}<span class="muted">×</span>${field('reps', si, 'reps', 'numeric')}`;
+          return `
+        <div class="set ${type === 'weight' ? '' : 'single'} ${set.done ? 'is-done' : ''}">
           <span class="set-n">${si + 1}</span>
-          <input aria-label="${esc(ex.name)} set ${si + 1} weight (${esc(ex.unit)})" inputmode="decimal" data-field="weight" data-ex="${ei}" data-set="${si}" value="${esc(set.weight)}" placeholder="—">
-          <span class="muted">×</span>
-          <input aria-label="${esc(ex.name)} set ${si + 1} reps" inputmode="numeric" data-field="reps" data-ex="${ei}" data-set="${si}" value="${esc(set.reps)}" placeholder="—">
+          ${inputs}
           <button class="check" aria-label="Set ${si + 1} done" aria-pressed="${set.done}" data-action="toggle-set" data-ex="${ei}" data-set="${si}">${set.done ? icons.check : ''}</button>
-        </div>`
-        )
+        </div>`;
+        })
         .join('');
-      const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map(core.formatSet).join(' · ')}</p>` : '';
+      const head =
+        type === 'weight'
+          ? `<div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>`
+          : `<div class="set single head-row"><span></span><span class="small muted">${type === 'distance' ? esc(ex.unit) : 'Time'}</span><span></span></div>`;
+      const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map((x) => core.formatSet(x, type, ex.unit)).join(' · ')}</p>` : '';
       const notes = ex.notes ? `<p class="muted small">${esc(ex.notes)}</p>` : '';
       return `
       <article class="card">
         <div class="row between">
           <h3>${esc(ex.name)}</h3>
-          <span class="muted small">${esc(core.formatTarget(ex.target, ex.unit))}</span>
+          <span class="muted small">${esc(core.formatTarget(ex.target, ex.unit, type))}</span>
         </div>
         ${notes}${last}
-        <div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>
+        ${head}
         ${rows}
         <button class="btn text small" data-action="add-set" data-ex="${ei}">+ Add set</button>
       </article>`;
@@ -235,17 +244,16 @@ function viewSessions() {
     .reverse()
     .map((e) => {
       const open = ui.openEntry === e.id;
-      const vol = core.entryVolume(e);
-      const unit = e.exercises[0] ? e.exercises[0].unit : '';
+      const totals = core.entryTotals(e).map((t) => ` · ${esc(t)}`).join('');
       const detail = open
         ? `<div class="detail">${e.exercises
-            .map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map(core.formatSet).join(' · ')}</span></div>`)
+            .map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map((x) => core.formatSet(x, core.typeOf(ex), ex.unit)).join(' · ')}</span></div>`)
             .join('')}</div>`
         : '';
       return `
       <div class="item">
         <button class="item-btn" aria-expanded="${open}" data-action="toggle-entry" data-id="${esc(e.id)}">
-          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(e.exercises.length, 'exercise')} · ${plural(core.entrySetCount(e), 'set')}${vol ? ` · ${fmtNum(vol)} ${esc(unit)}` : ''}</span></span>
+          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(e.exercises.length, 'exercise')} · ${plural(core.entrySetCount(e), 'set')}${totals}</span></span>
           <span class="chev ${open ? 'open' : ''}">${icons.chevron}</span>
         </button>
         ${detail}
@@ -260,8 +268,8 @@ function viewExercises() {
     .map(
       (x) => `
     <div class="item">
-      <button class="item-btn" data-action="open-exercise" data-name="${esc(x.name)}">
-        <span><strong>${esc(x.name)}</strong><br><span class="muted small">${plural(x.sessions, 'session')}${x.best ? ` · best ${esc(core.formatSet(x.best))}${x.best.weight ? ' ' + esc(x.unit) : ''}` : ''}</span></span>
+      <button class="item-btn" data-action="open-exercise" data-name="${esc(x.name)}" data-type="${x.type}">
+        <span><strong>${esc(x.name)}</strong><br><span class="muted small">${plural(x.sessions, 'session')}${bestLabel(x.best, x.type, x.unit)}</span></span>
         <span class="chev">${icons.chevron}</span>
       </button>
     </div>`
@@ -270,15 +278,15 @@ function viewExercises() {
 }
 
 function viewExercise() {
-  const name = ui.exercise;
-  const hist = core.exerciseHistory(data.log, name);
-  const best = core.bestSet(hist.flatMap((h) => h.sets));
+  const { name, type } = ui.exercise;
+  const hist = core.exerciseHistory(data.log, name, type);
+  const best = core.bestSet(hist.flatMap((h) => h.sets), type);
   const unit = hist[0] ? hist[0].unit : '';
   return `
   <button class="btn text back" data-action="close-exercise">${icons.back} Log</button>
   <header class="head">
     <div>
-      <p class="eyebrow">${plural(hist.length, 'session')}${best ? ` · best ${esc(core.formatSet(best))}${best.weight ? ' ' + esc(unit) : ''}` : ''}</p>
+      <p class="eyebrow">${plural(hist.length, 'session')}${bestLabel(best, type, unit)}</p>
       <h1 class="display">${esc(name)}</h1>
     </div>
   </header>
@@ -287,7 +295,7 @@ function viewExercise() {
       (h) => `
     <div class="item static">
       <div class="row between"><strong>Week ${h.week} · ${esc(h.dayName)}</strong></div>
-      <div class="muted small">${h.sets.map(core.formatSet).join(' · ')}</div>
+      <div class="muted small">${h.sets.map((x) => core.formatSet(x, type, h.unit)).join(' · ')}</div>
     </div>`
     )
     .join('')}</div>`;
@@ -305,7 +313,7 @@ function viewSchedule() {
           (d) => `
         <div class="sched-day">
           <p class="label">${esc(d.name)}</p>
-          ${d.exercises.map((e) => `<div class="row between small"><span>${esc(e.name)}</span><span class="muted">${esc(core.formatTarget(e, e.unit))}</span></div>`).join('')}
+          ${d.exercises.map((e) => `<div class="row between small"><span>${esc(e.name)}</span><span class="muted">${esc(core.formatTarget(e, e.unit, core.typeOf(e)))}</span></div>`).join('')}
         </div>`
         )
         .join('')}
@@ -377,8 +385,7 @@ const actions = {
   },
   'add-set': (el) => {
     const ex = data.active.exercises[el.dataset.ex];
-    const prev = ex.sets[ex.sets.length - 1];
-    ex.sets.push({ weight: prev ? prev.weight : '', reps: prev ? prev.reps : '', done: false });
+    ex.sets.push(core.nextSet(ex));
     save();
   },
   finish: () => {
@@ -400,7 +407,7 @@ const actions = {
   },
   'log-view': (el) => { ui.logView = el.dataset.view; },
   'toggle-entry': (el) => { ui.openEntry = ui.openEntry === el.dataset.id ? null : el.dataset.id; },
-  'open-exercise': (el) => { ui.exercise = el.dataset.name; window.scrollTo(0, 0); },
+  'open-exercise': (el) => { ui.exercise = { name: el.dataset.name, type: el.dataset.type || 'weight' }; window.scrollTo(0, 0); },
   'close-exercise': () => { ui.exercise = null; ui.logView = 'exercises'; },
   export: () => download('sisyphus-data.json', { exportedAt: new Date().toISOString(), ...data }),
   reset: () => {
@@ -432,7 +439,8 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (!el.dataset.field || !data.active) return;
-  data.active.exercises[el.dataset.ex].sets[el.dataset.set][el.dataset.field] = el.value.replace(',', '.');
+  const field = el.dataset.field;
+  data.active.exercises[el.dataset.ex].sets[el.dataset.set][field] = field === 'time' ? el.value : el.value.replace(',', '.');
   save();
 });
 
