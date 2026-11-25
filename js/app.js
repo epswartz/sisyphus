@@ -352,8 +352,9 @@ const actions = {
   tab: (el) => { ui.tab = el.dataset.tab; ui.exercise = null; window.scrollTo(0, 0); },
   'load-sample': async () => {
     try {
-      const res = await fetch('./sample-schedule.json');
-      setSchedule(core.parseSchedule(await res.text()), 'Sample schedule');
+      // The standalone build inlines the sample, since fetch() fails on file:// pages.
+      const text = typeof SAMPLE_SCHEDULE === 'string' ? SAMPLE_SCHEDULE : await (await fetch('./sample-schedule.json')).text();
+      setSchedule(core.parseSchedule(text), 'Sample schedule');
     } catch (e) {
       alert('Could not load the sample schedule: ' + e.message);
     }

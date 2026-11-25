@@ -21,6 +21,14 @@ Then open http://localhost:8000. To use it on a phone, host the folder on any st
 npm test
 ```
 
+### Single-file version
+
+[`standalone/sisyphus.html`](standalone/sisyphus.html) is the whole app in one file. Open it directly in a browser, no server needed. It has no offline caching or home-screen install. Rebuild it after changing the source:
+
+```bash
+node scripts/build-standalone.mjs
+```
+
 ## Schedule format
 
 ```json
