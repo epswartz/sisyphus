@@ -1,6 +1,6 @@
 // Offline support. Network first, so a new deploy is picked up on the next
 // open; the cache is only used when the network is unavailable.
-const CACHE = 'sisyphus-v2';
+const CACHE = 'sisyphus-v3';
 const SHELL = [
   './',
   './index.html',
@@ -9,7 +9,6 @@ const SHELL = [
   './js/core.js',
   './js/art.js',
   './js/version.js',
-  './sample-schedule.json',
   './manifest.webmanifest',
   './icon.svg',
 ];

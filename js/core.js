@@ -1,145 +1,72 @@
-// Pure logic: schedule parsing, week/day progress, sessions and the log.
+// Pure logic: the fixed weekly plan, run progression, sessions and the log.
 // No DOM access here, so it can be tested with `node --test`.
 
-export class ScheduleError extends Error {}
+// ---- The plan ---------------------------------------------------------------
 
-const fail = (msg) => { throw new ScheduleError(msg); };
-const str = (v) => (typeof v === 'string' ? v.trim() : '');
-const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+export const RUN = {
+  start: 0.5, // miles for the first run
+  growth: 1.1, // each run is 10% longer than the last one listed
+  catchUp: 1 / 3, // running further moves the base a third of the way to what you ran
+  unit: 'mi',
+};
+
+/** Strength exercises are placeholders until a schedule is imported for them. */
+export const STRENGTH_BLOCKS = [
+  { name: 'Block A', exercises: ['A1', 'A2', 'A3'] },
+  { name: 'Block B', exercises: ['B1', 'B2', 'B3'] },
+];
+export const STRENGTH_SETS = 3;
+
+export const DAYS = [
+  { name: 'Run 1', kind: 'run' },
+  { name: 'Strength', kind: 'strength' },
+  { name: 'Run 2', kind: 'run' },
+];
+
+export const freshState = () => ({ week: 1, completed: [], runTarget: RUN.start, active: null, log: [] });
+
+// ---- Run progression ---------------------------------------------------------
+
+export const roundMiles = (n) => Math.round(n * 100) / 100;
 
 /**
- * Parse and validate a schedule (JSON text or an object).
- * Accepts { name, unit?, weeks: [{ name?, days: [...] }] }
- * or the shorthand { name, unit?, days: [...] } for one repeating week.
+ * The next run's distance. Normally the listed distance plus 10%. If you ran
+ * further, the base moves a third of the way from listed to actual first.
+ * Skipped or unlogged runs (ran === null) leave the target unchanged.
  */
-export function parseSchedule(input) {
-  let data = input;
-  if (typeof input === 'string') {
-    try { data = JSON.parse(input); } catch (e) { fail('This file is not valid JSON (' + e.message + ').'); }
-  }
-  if (!isObj(data)) fail('The schedule must be a JSON object.');
-  const unit = str(data.unit) || 'kg';
-  const distanceUnit = str(data.distanceUnit) || 'mi';
-  let weeks;
-  if (Array.isArray(data.weeks)) weeks = data.weeks;
-  else if (Array.isArray(data.days)) weeks = [{ days: data.days }];
-  else fail('The schedule needs a "weeks" list, or a "days" list for one repeating week.');
-  if (!weeks.length) fail('"weeks" is empty.');
-  return {
-    name: str(data.name) || 'My schedule',
-    unit,
-    distanceUnit,
-    weeks: weeks.map((w, wi) => normWeek(w, wi, { unit, distanceUnit })),
-  };
+export function nextRunTarget(listed, ran) {
+  if (ran === null || ran === undefined) return listed;
+  const base = ran > roundMiles(listed) + 0.005 ? listed + (ran - listed) * RUN.catchUp : listed;
+  return base * RUN.growth;
 }
 
-function normWeek(w, wi, units) {
-  const where = `Week ${wi + 1}`;
-  if (!isObj(w)) fail(`${where} must be an object with a "days" list.`);
-  if (!Array.isArray(w.days) || !w.days.length) fail(`${where} needs a non-empty "days" list.`);
-  return { name: str(w.name) || where, days: w.days.map((d, di) => normDay(d, di, where, units)) };
-}
-
-function normDay(d, di, weekWhere, units) {
-  const where = `${weekWhere}, day ${di + 1}`;
-  if (!isObj(d)) fail(`${where} must be an object.`);
-  const name = str(d.name) || `Day ${di + 1}`;
-  if (!Array.isArray(d.exercises) || !d.exercises.length) fail(`${where} ("${name}") needs a non-empty "exercises" list.`);
-  return { name, exercises: d.exercises.map((e, ei) => normExercise(e, ei, `${where} ("${name}")`, units)) };
-}
-
-export const TYPES = ['weight', 'distance', 'time'];
-
-function normExercise(e, ei, dayWhere, units) {
-  const where = `${dayWhere}, exercise ${ei + 1}`;
-  if (!isObj(e)) fail(`${where} must be an object.`);
-  const name = str(e.name);
-  if (!name) fail(`${where} needs a "name".`);
-  const label = `${where} ("${name}")`;
-  const type = str(e.type) || 'weight';
-  if (!TYPES.includes(type)) fail(`${label}: "type" must be one of ${TYPES.map((t) => `"${t}"`).join(', ')}.`);
-
-  const sets = e.sets === undefined ? (type === 'weight' ? 3 : 1) : e.sets;
-  if (!Number.isInteger(sets) || sets < 1 || sets > 50) fail(`${label}: "sets" must be a whole number from 1 to 50.`);
-  const positive = (key) => {
-    const v = e[key] === undefined || e[key] === null ? null : e[key];
-    if (v !== null && !(typeof v === 'number' && v > 0)) fail(`${label}: "${key}" must be a number above 0.`);
-    return v;
-  };
-  const out = { name, type, sets, reps: null, weight: null, distance: null, seconds: null, unit: '', notes: str(e.notes) };
-
-  if (type === 'distance') {
-    out.distance = positive('distance');
-    out.unit = str(e.unit) || units.distanceUnit;
-  } else if (type === 'time') {
-    out.seconds = positive('seconds');
-  } else {
-    let reps = e.reps === undefined ? null : e.reps;
-    if (reps !== null && !((typeof reps === 'number' && reps > 0) || (typeof reps === 'string' && reps.trim()))) {
-      fail(`${label}: "reps" must be a number or text like "8-10".`);
-    }
-    out.reps = typeof reps === 'string' ? reps.trim() : reps;
-    const weight = e.weight === undefined || e.weight === null ? null : e.weight;
-    if (weight !== null && !(typeof weight === 'number' && weight >= 0)) fail(`${label}: "weight" must be a number.`);
-    out.weight = weight;
-    out.unit = str(e.unit) || units.unit;
-  }
+/** Upcoming run distances, assuming each is run exactly as listed. */
+export function upcomingRuns(target, count) {
+  const out = [];
+  for (let i = 0, t = target; i < count; i++, t *= RUN.growth) out.push(roundMiles(t));
   return out;
 }
 
-// ---- Durations --------------------------------------------------------------
+// ---- Week progress -----------------------------------------------------------
 
-/** "1:30" → 90, "1:02:03" → 3723, "45" → 45 (plain numbers are seconds). */
-export function parseDuration(text) {
-  const t = String(text ?? '').trim();
-  if (!t) return null;
-  if (!/^\d+(\.\d+)?$|^\d+(:\d{1,2}){1,2}$/.test(t)) return null;
-  return Math.round(t.split(':').reduce((acc, part) => acc * 60 + Number(part), 0));
-}
-
-export function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return '';
-  const s = Math.round(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = String(s % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-}
-
-// ---- Progress through the weeks ------------------------------------------
-
-export const freshProgress = () => ({ week: 1, completed: [] });
-
-/** The template week used for an (unbounded) week number; schedules repeat. */
-export function templateWeek(schedule, weekNumber) {
-  const n = schedule.weeks.length;
-  return schedule.weeks[(weekNumber - 1) % n];
-}
-
-export function nextDayIndex(schedule, progress) {
-  const days = templateWeek(schedule, progress.week).days;
-  for (let i = 0; i < days.length; i++) if (!progress.completed.includes(i)) return i;
+export function nextDayIndex(state) {
+  for (let i = 0; i < DAYS.length; i++) if (!state.completed.includes(i)) return i;
   return null;
 }
 
-/** Mark a day done (or skipped). Finishing the last day moves to the next week. */
-export function completeDay(schedule, progress, dayIndex) {
-  const days = templateWeek(schedule, progress.week).days;
-  const completed = progress.completed.includes(dayIndex) ? progress.completed : [...progress.completed, dayIndex];
-  if (completed.length >= days.length) return { week: progress.week + 1, completed: [] };
-  return { week: progress.week, completed };
+/** Mark a day done. Finishing the last day of the week starts the next week. */
+function completeDay(state, dayIndex) {
+  const completed = state.completed.includes(dayIndex) ? state.completed : [...state.completed, dayIndex];
+  return completed.length >= DAYS.length ? { week: state.week + 1, completed: [] } : { week: state.week, completed };
 }
 
-// ---- Sessions ---------------------------------------------------------------
+export function skipDay(state, dayIndex) {
+  return { ...state, ...completeDay(state, dayIndex) };
+}
 
-/** Exercises saved before types existed are weight exercises. */
+// ---- Sessions ------------------------------------------------------------------
+
 export const typeOf = (ex) => (ex && ex.type) || 'weight';
-
-const leadingNumber = (reps) => {
-  if (typeof reps === 'number') return reps;
-  const m = typeof reps === 'string' ? reps.match(/\d+/) : null;
-  return m ? Number(m[0]) : '';
-};
 
 /** Sets from the most recent logged session that included this exercise. */
 export function lastSetsFor(log, name, type = 'weight') {
@@ -150,115 +77,130 @@ export function lastSetsFor(log, name, type = 'weight') {
   return null;
 }
 
-/** The editable values a new set starts with. Inputs hold text, so time is "m:ss". */
-function prefillSet(ex, prev) {
-  if (ex.type === 'distance') return { distance: ex.distance !== null ? ex.distance : prev ? prev.distance ?? '' : '', done: false };
-  if (ex.type === 'time') return { time: formatDuration(ex.seconds !== null ? ex.seconds : prev ? prev.seconds : null), done: false };
-  return { weight: ex.weight !== null ? ex.weight : prev ? prev.weight ?? '' : '', reps: leadingNumber(ex.reps), done: false };
-}
+export const strengthName = (id) => `${id} (TBD)`;
 
-export function startSession(schedule, progress, dayIndex, log, now = Date.now()) {
-  const day = templateWeek(schedule, progress.week).days[dayIndex];
+export function startSession(state, dayIndex, now = Date.now()) {
+  const day = DAYS[dayIndex];
+  const base = { week: state.week, dayIndex, dayName: day.name, kind: day.kind, startedAt: now };
+  if (day.kind === 'run') {
+    return {
+      ...base,
+      runTarget: state.runTarget,
+      exercises: [
+        {
+          name: 'Run',
+          type: 'distance',
+          unit: RUN.unit,
+          target: { sets: 1, distance: roundMiles(state.runTarget) },
+          last: lastSetsFor(state.log, 'Run', 'distance'),
+          sets: [{ distance: roundMiles(state.runTarget), done: false }],
+        },
+      ],
+    };
+  }
   return {
-    week: progress.week,
-    dayIndex,
-    dayName: day.name,
-    startedAt: now,
-    exercises: day.exercises.map((raw) => {
-      const ex = { ...raw, type: typeOf(raw) };
-      const last = lastSetsFor(log, ex.name, ex.type);
-      const sets = [];
-      for (let i = 0; i < ex.sets; i++) sets.push(prefillSet(ex, last ? last[Math.min(i, last.length - 1)] : null));
-      return {
-        name: ex.name,
-        type: ex.type,
-        unit: ex.unit,
-        notes: ex.notes,
-        target: { sets: ex.sets, reps: ex.reps, weight: ex.weight, distance: ex.distance, seconds: ex.seconds },
-        last,
-        sets,
-      };
-    }),
+    ...base,
+    exercises: STRENGTH_BLOCKS.flatMap((block) =>
+      block.exercises.map((id) => {
+        const name = strengthName(id);
+        const last = lastSetsFor(state.log, name);
+        const sets = [];
+        for (let i = 0; i < STRENGTH_SETS; i++) {
+          const prev = last ? last[Math.min(i, last.length - 1)] : null;
+          sets.push({ weight: prev ? prev.weight ?? '' : '', reps: prev ? prev.reps ?? '' : '', done: false });
+        }
+        return { name, block: block.name, type: 'weight', unit: 'kg', target: { sets: STRENGTH_SETS }, last, sets };
+      })
+    ),
   };
 }
 
 /** A copy of the set before it, for "+ Add set". */
 export function nextSet(ex) {
   const prev = ex.sets[ex.sets.length - 1];
-  return prev ? { ...prev, done: false } : prefillSet({ ...ex.target, type: typeOf(ex) }, null);
+  if (prev) return { ...prev, done: false };
+  return typeOf(ex) === 'distance' ? { distance: '', done: false } : { weight: '', reps: '', done: false };
 }
 
 const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 
 function loggedSet(set, type) {
   if (type === 'distance') return { distance: num(set.distance) };
-  if (type === 'time') return { seconds: parseDuration(set.time) };
   return { weight: num(set.weight), reps: num(set.reps) };
-}
-
-/** Turn an in-progress session into a log entry holding only the checked sets. */
-export function finishSession(session, now = Date.now()) {
-  return {
-    id: `${session.startedAt}-${session.week}-${session.dayIndex}`,
-    week: session.week,
-    dayIndex: session.dayIndex,
-    dayName: session.dayName,
-    startedAt: session.startedAt,
-    finishedAt: now,
-    exercises: session.exercises
-      .map((ex) => ({
-        name: ex.name,
-        type: typeOf(ex),
-        unit: ex.unit,
-        sets: ex.sets.filter((s) => s.done).map((s) => loggedSet(s, typeOf(ex))),
-      }))
-      .filter((ex) => ex.sets.length),
-  };
 }
 
 export const doneSetCount = (session) => session.exercises.reduce((n, ex) => n + ex.sets.filter((s) => s.done).length, 0);
 
-// ---- Log summaries --------------------------------------------------------
+/** Total distance of the checked sets of a run session, or null if none were checked. */
+export function ranDistance(session) {
+  let total = null;
+  for (const ex of session.exercises) {
+    if (typeOf(ex) !== 'distance') continue;
+    for (const s of ex.sets) if (s.done && num(s.distance) !== null) total = (total || 0) + num(s.distance);
+  }
+  return total;
+}
+
+/**
+ * Finish the active session: log the checked sets, mark the day done and,
+ * for runs, set the next run's distance. Returns the new state.
+ */
+export function finishSession(state, now = Date.now()) {
+  const a = state.active;
+  const exercises = a.exercises
+    .map((ex) => ({ name: ex.name, type: typeOf(ex), unit: ex.unit, sets: ex.sets.filter((s) => s.done).map((s) => loggedSet(s, typeOf(ex))) }))
+    .filter((ex) => ex.sets.length);
+  const entry = {
+    id: `${a.startedAt}-${a.week}-${a.dayIndex}`,
+    week: a.week,
+    dayIndex: a.dayIndex,
+    dayName: a.dayName,
+    startedAt: a.startedAt,
+    finishedAt: now,
+    exercises,
+  };
+  if (a.kind === 'run') entry.listed = roundMiles(a.runTarget);
+  const next = {
+    ...state,
+    ...completeDay(state, a.dayIndex),
+    active: null,
+    log: exercises.length ? [...state.log, entry] : state.log,
+  };
+  if (a.kind === 'run') next.runTarget = nextRunTarget(a.runTarget, ranDistance(a));
+  return next;
+}
+
+// ---- Log summaries -------------------------------------------------------------
 
 export const entrySetCount = (entry) => entry.exercises.reduce((n, ex) => n + ex.sets.length, 0);
 
-export const entryVolume = (entry) =>
-  entry.exercises
-    .filter((ex) => typeOf(ex) === 'weight')
-    .reduce((v, ex) => v + ex.sets.reduce((s, set) => s + (set.weight || 0) * (set.reps || 0), 0), 0);
+const round2 = (n) => Math.round(n * 100) / 100;
 
-/** Totals worth showing for a session, e.g. ["1,260 kg", "1.5 mi", "3:00"]. */
+/** Totals worth showing for a session, e.g. ["1,260 kg", "1.5 mi"]. */
 export function entryTotals(entry) {
-  const out = [];
   const byUnit = new Map();
-  let seconds = 0;
   for (const ex of entry.exercises) {
     const type = typeOf(ex);
     for (const set of ex.sets) {
-      if (type === 'weight') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.weight || 0) * (set.reps || 0));
-      else if (type === 'distance') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.distance || 0));
-      else seconds += set.seconds || 0;
+      const add = type === 'distance' ? set.distance || 0 : type === 'weight' ? (set.weight || 0) * (set.reps || 0) : 0;
+      if (add) byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + add);
     }
   }
-  for (const [unit, total] of byUnit) if (total) out.push(`${round2(total).toLocaleString()} ${unit}`);
-  if (seconds) out.push(formatDuration(seconds));
-  return out;
+  return [...byUnit].map(([unit, total]) => `${round2(total).toLocaleString()} ${unit}`);
 }
 
-const round2 = (n) => Math.round(n * 100) / 100;
-
-/** The best set: heaviest (then most reps), furthest, or longest. */
+/** The best set: heaviest (then most reps), or furthest. */
 export function bestSet(sets, type = 'weight') {
   let best = null;
-  const better = {
-    weight: (a, b) => (a.weight || 0) > (b.weight || 0) || ((a.weight || 0) === (b.weight || 0) && (a.reps || 0) > (b.reps || 0)),
-    distance: (a, b) => (a.distance || 0) > (b.distance || 0),
-    time: (a, b) => (a.seconds || 0) > (b.seconds || 0),
-  }[type];
   for (const s of sets) {
-    const empty = type === 'weight' ? s.weight === null && s.reps === null : type === 'distance' ? s.distance === null : s.seconds === null;
-    if (empty) continue;
-    if (!best || better(s, best)) best = s;
+    if (type === 'distance') {
+      if (s.distance === null || s.distance === undefined) continue;
+      if (!best || s.distance > best.distance) best = s;
+    } else if (type === 'weight') {
+      if (s.weight === null && s.reps === null) continue;
+      const w = s.weight || 0, bw = best ? best.weight || 0 : 0;
+      if (!best || w > bw || (w === bw && (s.reps || 0) > (best.reps || 0))) best = s;
+    }
   }
   return best;
 }
@@ -288,26 +230,15 @@ export function exerciseHistory(log, name, type = 'weight') {
   const out = [];
   for (let i = log.length - 1; i >= 0; i--) {
     const ex = log[i].exercises.find((x) => x.name === name && typeOf(x) === type);
-    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, type, unit: ex.unit, sets: ex.sets });
+    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, listed: log[i].listed, type, unit: ex.unit, sets: ex.sets });
   }
   return out;
 }
 
-/** "60×8" (weights), "1.2 mi" (distance), "1:30" (time). */
+/** "60×8" (weights) or "1.2 mi" (distance). */
 export function formatSet(s, type = 'weight', unit = '') {
-  if (type === 'distance') return s.distance === null ? '—' : `${round2(s.distance)}${unit ? ' ' + unit : ''}`;
-  if (type === 'time') return s.seconds === null ? '—' : formatDuration(s.seconds);
+  if (type === 'distance') return s.distance === null || s.distance === undefined ? '—' : `${round2(s.distance)}${unit ? ' ' + unit : ''}`;
+  if (type !== 'weight') return '—';
   if (s.weight === null || s.weight === 0) return s.reps === null ? '—' : `${s.reps}`;
   return `${s.weight}×${s.reps === null ? '?' : s.reps}`;
-}
-
-/** The target as written in the schedule, e.g. "3 × 8 · 60 kg", "0.5 mi", "3 × 0:45". */
-export function formatTarget(t, unit, type = 'weight') {
-  if (type === 'distance' || type === 'time') {
-    const each = type === 'distance' ? (t.distance === null ? 'any distance' : `${t.distance} ${unit}`) : t.seconds === null ? 'any time' : formatDuration(t.seconds);
-    return t.sets > 1 ? `${t.sets} × ${each}` : each;
-  }
-  let out = `${t.sets} ×${t.reps === null ? ' ?' : ' ' + t.reps}`;
-  if (t.weight !== null) out += ` · ${t.weight} ${unit}`;
-  return out;
 }

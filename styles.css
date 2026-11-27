@@ -118,6 +118,9 @@ details.card > summary { list-style: none; display: flex; justify-content: space
 details.card > summary::-webkit-details-marker { display: none; }
 .sched-day { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
 .actions { margin-top: 24px; }
+.block-head { margin: 10px 0 -2px; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+.hint { margin: -10px 0 16px; line-height: 1.5; }
+.upcoming { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .build { font-variant-numeric: tabular-nums; }
 .format { margin-top: 20px; }
 .format summary { cursor: pointer; color: var(--muted); font-size: 14px; min-height: 44px; display: flex; align-items: center; }

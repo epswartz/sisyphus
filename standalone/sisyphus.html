@@ -133,6 +133,9 @@ details.card > summary { list-style: none; display: flex; justify-content: space
 details.card > summary::-webkit-details-marker { display: none; }
 .sched-day { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
 .actions { margin-top: 24px; }
+.block-head { margin: 10px 0 -2px; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+.hint { margin: -10px 0 16px; line-height: 1.5; }
+.upcoming { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .build { font-variant-numeric: tabular-nums; }
 .format { margin-top: 20px; }
 .format summary { cursor: pointer; color: var(--muted); font-size: 14px; min-height: 44px; display: flex; align-items: center; }
@@ -167,153 +170,78 @@ details.card > summary::-webkit-details-marker { display: none; }
 <noscript>Sisyphus needs JavaScript turned on.</noscript>
 <script>
 (() => {
-const SAMPLE_SCHEDULE = "{\n  \"name\": \"Push Pull Legs\",\n  \"unit\": \"kg\",\n  \"weeks\": [\n    {\n      \"name\": \"Base week\",\n      \"days\": [\n        {\n          \"name\": \"Push\",\n          \"exercises\": [\n            { \"name\": \"Bench press\", \"sets\": 3, \"reps\": 8, \"weight\": 60 },\n            { \"name\": \"Overhead press\", \"sets\": 3, \"reps\": 8, \"weight\": 35 },\n            { \"name\": \"Dips\", \"sets\": 2, \"reps\": \"10-12\", \"notes\": \"Bodyweight\" }\n          ]\n        },\n        {\n          \"name\": \"Pull\",\n          \"exercises\": [\n            { \"name\": \"Deadlift\", \"sets\": 3, \"reps\": 5, \"weight\": 100 },\n            { \"name\": \"Pull-ups\", \"sets\": 3, \"reps\": \"6-8\" },\n            { \"name\": \"Barbell row\", \"sets\": 3, \"reps\": 8, \"weight\": 50 }\n          ]\n        },\n        {\n          \"name\": \"Legs\",\n          \"exercises\": [\n            { \"name\": \"Squat\", \"sets\": 3, \"reps\": 6, \"weight\": 80 },\n            { \"name\": \"Romanian deadlift\", \"sets\": 3, \"reps\": 10, \"weight\": 60 },\n            { \"name\": \"Calf raise\", \"sets\": 3, \"reps\": 15 }\n          ]\n        }\n      ]\n    },\n    {\n      \"name\": \"Heavy week\",\n      \"days\": [\n        {\n          \"name\": \"Push\",\n          \"exercises\": [\n            { \"name\": \"Bench press\", \"sets\": 5, \"reps\": 5, \"weight\": 65 },\n            { \"name\": \"Overhead press\", \"sets\": 4, \"reps\": 5, \"weight\": 37.5 }\n          ]\n        },\n        {\n          \"name\": \"Pull\",\n          \"exercises\": [\n            { \"name\": \"Deadlift\", \"sets\": 5, \"reps\": 3, \"weight\": 110 },\n            { \"name\": \"Pull-ups\", \"sets\": 4, \"reps\": \"5\" }\n          ]\n        },\n        {\n          \"name\": \"Legs\",\n          \"exercises\": [\n            { \"name\": \"Squat\", \"sets\": 5, \"reps\": 5, \"weight\": 85 },\n            { \"name\": \"Calf raise\", \"sets\": 3, \"reps\": 15 }\n          ]\n        }\n      ]\n    }\n  ]\n}\n";
-
-const BUILD = "local · 876d58a";
+const BUILD = "local · fbbb1c0";
 
 const core = (() => {
-// Pure logic: schedule parsing, week/day progress, sessions and the log.
+// Pure logic: the fixed weekly plan, run progression, sessions and the log.
 // No DOM access here, so it can be tested with `node --test`.
 
-class ScheduleError extends Error {}
+// ---- The plan ---------------------------------------------------------------
 
-const fail = (msg) => { throw new ScheduleError(msg); };
-const str = (v) => (typeof v === 'string' ? v.trim() : '');
-const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const RUN = {
+  start: 0.5, // miles for the first run
+  growth: 1.1, // each run is 10% longer than the last one listed
+  catchUp: 1 / 3, // running further moves the base a third of the way to what you ran
+  unit: 'mi',
+};
+
+/** Strength exercises are placeholders until a schedule is imported for them. */
+const STRENGTH_BLOCKS = [
+  { name: 'Block A', exercises: ['A1', 'A2', 'A3'] },
+  { name: 'Block B', exercises: ['B1', 'B2', 'B3'] },
+];
+const STRENGTH_SETS = 3;
+
+const DAYS = [
+  { name: 'Run 1', kind: 'run' },
+  { name: 'Strength', kind: 'strength' },
+  { name: 'Run 2', kind: 'run' },
+];
+
+const freshState = () => ({ week: 1, completed: [], runTarget: RUN.start, active: null, log: [] });
+
+// ---- Run progression ---------------------------------------------------------
+
+const roundMiles = (n) => Math.round(n * 100) / 100;
 
 /**
- * Parse and validate a schedule (JSON text or an object).
- * Accepts { name, unit?, weeks: [{ name?, days: [...] }] }
- * or the shorthand { name, unit?, days: [...] } for one repeating week.
+ * The next run's distance. Normally the listed distance plus 10%. If you ran
+ * further, the base moves a third of the way from listed to actual first.
+ * Skipped or unlogged runs (ran === null) leave the target unchanged.
  */
-function parseSchedule(input) {
-  let data = input;
-  if (typeof input === 'string') {
-    try { data = JSON.parse(input); } catch (e) { fail('This file is not valid JSON (' + e.message + ').'); }
-  }
-  if (!isObj(data)) fail('The schedule must be a JSON object.');
-  const unit = str(data.unit) || 'kg';
-  const distanceUnit = str(data.distanceUnit) || 'mi';
-  let weeks;
-  if (Array.isArray(data.weeks)) weeks = data.weeks;
-  else if (Array.isArray(data.days)) weeks = [{ days: data.days }];
-  else fail('The schedule needs a "weeks" list, or a "days" list for one repeating week.');
-  if (!weeks.length) fail('"weeks" is empty.');
-  return {
-    name: str(data.name) || 'My schedule',
-    unit,
-    distanceUnit,
-    weeks: weeks.map((w, wi) => normWeek(w, wi, { unit, distanceUnit })),
-  };
+function nextRunTarget(listed, ran) {
+  if (ran === null || ran === undefined) return listed;
+  const base = ran > roundMiles(listed) + 0.005 ? listed + (ran - listed) * RUN.catchUp : listed;
+  return base * RUN.growth;
 }
 
-function normWeek(w, wi, units) {
-  const where = `Week ${wi + 1}`;
-  if (!isObj(w)) fail(`${where} must be an object with a "days" list.`);
-  if (!Array.isArray(w.days) || !w.days.length) fail(`${where} needs a non-empty "days" list.`);
-  return { name: str(w.name) || where, days: w.days.map((d, di) => normDay(d, di, where, units)) };
-}
-
-function normDay(d, di, weekWhere, units) {
-  const where = `${weekWhere}, day ${di + 1}`;
-  if (!isObj(d)) fail(`${where} must be an object.`);
-  const name = str(d.name) || `Day ${di + 1}`;
-  if (!Array.isArray(d.exercises) || !d.exercises.length) fail(`${where} ("${name}") needs a non-empty "exercises" list.`);
-  return { name, exercises: d.exercises.map((e, ei) => normExercise(e, ei, `${where} ("${name}")`, units)) };
-}
-
-const TYPES = ['weight', 'distance', 'time'];
-
-function normExercise(e, ei, dayWhere, units) {
-  const where = `${dayWhere}, exercise ${ei + 1}`;
-  if (!isObj(e)) fail(`${where} must be an object.`);
-  const name = str(e.name);
-  if (!name) fail(`${where} needs a "name".`);
-  const label = `${where} ("${name}")`;
-  const type = str(e.type) || 'weight';
-  if (!TYPES.includes(type)) fail(`${label}: "type" must be one of ${TYPES.map((t) => `"${t}"`).join(', ')}.`);
-
-  const sets = e.sets === undefined ? (type === 'weight' ? 3 : 1) : e.sets;
-  if (!Number.isInteger(sets) || sets < 1 || sets > 50) fail(`${label}: "sets" must be a whole number from 1 to 50.`);
-  const positive = (key) => {
-    const v = e[key] === undefined || e[key] === null ? null : e[key];
-    if (v !== null && !(typeof v === 'number' && v > 0)) fail(`${label}: "${key}" must be a number above 0.`);
-    return v;
-  };
-  const out = { name, type, sets, reps: null, weight: null, distance: null, seconds: null, unit: '', notes: str(e.notes) };
-
-  if (type === 'distance') {
-    out.distance = positive('distance');
-    out.unit = str(e.unit) || units.distanceUnit;
-  } else if (type === 'time') {
-    out.seconds = positive('seconds');
-  } else {
-    let reps = e.reps === undefined ? null : e.reps;
-    if (reps !== null && !((typeof reps === 'number' && reps > 0) || (typeof reps === 'string' && reps.trim()))) {
-      fail(`${label}: "reps" must be a number or text like "8-10".`);
-    }
-    out.reps = typeof reps === 'string' ? reps.trim() : reps;
-    const weight = e.weight === undefined || e.weight === null ? null : e.weight;
-    if (weight !== null && !(typeof weight === 'number' && weight >= 0)) fail(`${label}: "weight" must be a number.`);
-    out.weight = weight;
-    out.unit = str(e.unit) || units.unit;
-  }
+/** Upcoming run distances, assuming each is run exactly as listed. */
+function upcomingRuns(target, count) {
+  const out = [];
+  for (let i = 0, t = target; i < count; i++, t *= RUN.growth) out.push(roundMiles(t));
   return out;
 }
 
-// ---- Durations --------------------------------------------------------------
+// ---- Week progress -----------------------------------------------------------
 
-/** "1:30" → 90, "1:02:03" → 3723, "45" → 45 (plain numbers are seconds). */
-function parseDuration(text) {
-  const t = String(text ?? '').trim();
-  if (!t) return null;
-  if (!/^\d+(\.\d+)?$|^\d+(:\d{1,2}){1,2}$/.test(t)) return null;
-  return Math.round(t.split(':').reduce((acc, part) => acc * 60 + Number(part), 0));
-}
-
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return '';
-  const s = Math.round(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = String(s % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-}
-
-// ---- Progress through the weeks ------------------------------------------
-
-const freshProgress = () => ({ week: 1, completed: [] });
-
-/** The template week used for an (unbounded) week number; schedules repeat. */
-function templateWeek(schedule, weekNumber) {
-  const n = schedule.weeks.length;
-  return schedule.weeks[(weekNumber - 1) % n];
-}
-
-function nextDayIndex(schedule, progress) {
-  const days = templateWeek(schedule, progress.week).days;
-  for (let i = 0; i < days.length; i++) if (!progress.completed.includes(i)) return i;
+function nextDayIndex(state) {
+  for (let i = 0; i < DAYS.length; i++) if (!state.completed.includes(i)) return i;
   return null;
 }
 
-/** Mark a day done (or skipped). Finishing the last day moves to the next week. */
-function completeDay(schedule, progress, dayIndex) {
-  const days = templateWeek(schedule, progress.week).days;
-  const completed = progress.completed.includes(dayIndex) ? progress.completed : [...progress.completed, dayIndex];
-  if (completed.length >= days.length) return { week: progress.week + 1, completed: [] };
-  return { week: progress.week, completed };
+/** Mark a day done. Finishing the last day of the week starts the next week. */
+function completeDay(state, dayIndex) {
+  const completed = state.completed.includes(dayIndex) ? state.completed : [...state.completed, dayIndex];
+  return completed.length >= DAYS.length ? { week: state.week + 1, completed: [] } : { week: state.week, completed };
 }
 
-// ---- Sessions ---------------------------------------------------------------
+function skipDay(state, dayIndex) {
+  return { ...state, ...completeDay(state, dayIndex) };
+}
 
-/** Exercises saved before types existed are weight exercises. */
+// ---- Sessions ------------------------------------------------------------------
+
 const typeOf = (ex) => (ex && ex.type) || 'weight';
-
-const leadingNumber = (reps) => {
-  if (typeof reps === 'number') return reps;
-  const m = typeof reps === 'string' ? reps.match(/\d+/) : null;
-  return m ? Number(m[0]) : '';
-};
 
 /** Sets from the most recent logged session that included this exercise. */
 function lastSetsFor(log, name, type = 'weight') {
@@ -324,115 +252,130 @@ function lastSetsFor(log, name, type = 'weight') {
   return null;
 }
 
-/** The editable values a new set starts with. Inputs hold text, so time is "m:ss". */
-function prefillSet(ex, prev) {
-  if (ex.type === 'distance') return { distance: ex.distance !== null ? ex.distance : prev ? prev.distance ?? '' : '', done: false };
-  if (ex.type === 'time') return { time: formatDuration(ex.seconds !== null ? ex.seconds : prev ? prev.seconds : null), done: false };
-  return { weight: ex.weight !== null ? ex.weight : prev ? prev.weight ?? '' : '', reps: leadingNumber(ex.reps), done: false };
-}
+const strengthName = (id) => `${id} (TBD)`;
 
-function startSession(schedule, progress, dayIndex, log, now = Date.now()) {
-  const day = templateWeek(schedule, progress.week).days[dayIndex];
+function startSession(state, dayIndex, now = Date.now()) {
+  const day = DAYS[dayIndex];
+  const base = { week: state.week, dayIndex, dayName: day.name, kind: day.kind, startedAt: now };
+  if (day.kind === 'run') {
+    return {
+      ...base,
+      runTarget: state.runTarget,
+      exercises: [
+        {
+          name: 'Run',
+          type: 'distance',
+          unit: RUN.unit,
+          target: { sets: 1, distance: roundMiles(state.runTarget) },
+          last: lastSetsFor(state.log, 'Run', 'distance'),
+          sets: [{ distance: roundMiles(state.runTarget), done: false }],
+        },
+      ],
+    };
+  }
   return {
-    week: progress.week,
-    dayIndex,
-    dayName: day.name,
-    startedAt: now,
-    exercises: day.exercises.map((raw) => {
-      const ex = { ...raw, type: typeOf(raw) };
-      const last = lastSetsFor(log, ex.name, ex.type);
-      const sets = [];
-      for (let i = 0; i < ex.sets; i++) sets.push(prefillSet(ex, last ? last[Math.min(i, last.length - 1)] : null));
-      return {
-        name: ex.name,
-        type: ex.type,
-        unit: ex.unit,
-        notes: ex.notes,
-        target: { sets: ex.sets, reps: ex.reps, weight: ex.weight, distance: ex.distance, seconds: ex.seconds },
-        last,
-        sets,
-      };
-    }),
+    ...base,
+    exercises: STRENGTH_BLOCKS.flatMap((block) =>
+      block.exercises.map((id) => {
+        const name = strengthName(id);
+        const last = lastSetsFor(state.log, name);
+        const sets = [];
+        for (let i = 0; i < STRENGTH_SETS; i++) {
+          const prev = last ? last[Math.min(i, last.length - 1)] : null;
+          sets.push({ weight: prev ? prev.weight ?? '' : '', reps: prev ? prev.reps ?? '' : '', done: false });
+        }
+        return { name, block: block.name, type: 'weight', unit: 'kg', target: { sets: STRENGTH_SETS }, last, sets };
+      })
+    ),
   };
 }
 
 /** A copy of the set before it, for "+ Add set". */
 function nextSet(ex) {
   const prev = ex.sets[ex.sets.length - 1];
-  return prev ? { ...prev, done: false } : prefillSet({ ...ex.target, type: typeOf(ex) }, null);
+  if (prev) return { ...prev, done: false };
+  return typeOf(ex) === 'distance' ? { distance: '', done: false } : { weight: '', reps: '', done: false };
 }
 
 const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 
 function loggedSet(set, type) {
   if (type === 'distance') return { distance: num(set.distance) };
-  if (type === 'time') return { seconds: parseDuration(set.time) };
   return { weight: num(set.weight), reps: num(set.reps) };
-}
-
-/** Turn an in-progress session into a log entry holding only the checked sets. */
-function finishSession(session, now = Date.now()) {
-  return {
-    id: `${session.startedAt}-${session.week}-${session.dayIndex}`,
-    week: session.week,
-    dayIndex: session.dayIndex,
-    dayName: session.dayName,
-    startedAt: session.startedAt,
-    finishedAt: now,
-    exercises: session.exercises
-      .map((ex) => ({
-        name: ex.name,
-        type: typeOf(ex),
-        unit: ex.unit,
-        sets: ex.sets.filter((s) => s.done).map((s) => loggedSet(s, typeOf(ex))),
-      }))
-      .filter((ex) => ex.sets.length),
-  };
 }
 
 const doneSetCount = (session) => session.exercises.reduce((n, ex) => n + ex.sets.filter((s) => s.done).length, 0);
 
-// ---- Log summaries --------------------------------------------------------
+/** Total distance of the checked sets of a run session, or null if none were checked. */
+function ranDistance(session) {
+  let total = null;
+  for (const ex of session.exercises) {
+    if (typeOf(ex) !== 'distance') continue;
+    for (const s of ex.sets) if (s.done && num(s.distance) !== null) total = (total || 0) + num(s.distance);
+  }
+  return total;
+}
+
+/**
+ * Finish the active session: log the checked sets, mark the day done and,
+ * for runs, set the next run's distance. Returns the new state.
+ */
+function finishSession(state, now = Date.now()) {
+  const a = state.active;
+  const exercises = a.exercises
+    .map((ex) => ({ name: ex.name, type: typeOf(ex), unit: ex.unit, sets: ex.sets.filter((s) => s.done).map((s) => loggedSet(s, typeOf(ex))) }))
+    .filter((ex) => ex.sets.length);
+  const entry = {
+    id: `${a.startedAt}-${a.week}-${a.dayIndex}`,
+    week: a.week,
+    dayIndex: a.dayIndex,
+    dayName: a.dayName,
+    startedAt: a.startedAt,
+    finishedAt: now,
+    exercises,
+  };
+  if (a.kind === 'run') entry.listed = roundMiles(a.runTarget);
+  const next = {
+    ...state,
+    ...completeDay(state, a.dayIndex),
+    active: null,
+    log: exercises.length ? [...state.log, entry] : state.log,
+  };
+  if (a.kind === 'run') next.runTarget = nextRunTarget(a.runTarget, ranDistance(a));
+  return next;
+}
+
+// ---- Log summaries -------------------------------------------------------------
 
 const entrySetCount = (entry) => entry.exercises.reduce((n, ex) => n + ex.sets.length, 0);
 
-const entryVolume = (entry) =>
-  entry.exercises
-    .filter((ex) => typeOf(ex) === 'weight')
-    .reduce((v, ex) => v + ex.sets.reduce((s, set) => s + (set.weight || 0) * (set.reps || 0), 0), 0);
+const round2 = (n) => Math.round(n * 100) / 100;
 
-/** Totals worth showing for a session, e.g. ["1,260 kg", "1.5 mi", "3:00"]. */
+/** Totals worth showing for a session, e.g. ["1,260 kg", "1.5 mi"]. */
 function entryTotals(entry) {
-  const out = [];
   const byUnit = new Map();
-  let seconds = 0;
   for (const ex of entry.exercises) {
     const type = typeOf(ex);
     for (const set of ex.sets) {
-      if (type === 'weight') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.weight || 0) * (set.reps || 0));
-      else if (type === 'distance') byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + (set.distance || 0));
-      else seconds += set.seconds || 0;
+      const add = type === 'distance' ? set.distance || 0 : type === 'weight' ? (set.weight || 0) * (set.reps || 0) : 0;
+      if (add) byUnit.set(ex.unit, (byUnit.get(ex.unit) || 0) + add);
     }
   }
-  for (const [unit, total] of byUnit) if (total) out.push(`${round2(total).toLocaleString()} ${unit}`);
-  if (seconds) out.push(formatDuration(seconds));
-  return out;
+  return [...byUnit].map(([unit, total]) => `${round2(total).toLocaleString()} ${unit}`);
 }
 
-const round2 = (n) => Math.round(n * 100) / 100;
-
-/** The best set: heaviest (then most reps), furthest, or longest. */
+/** The best set: heaviest (then most reps), or furthest. */
 function bestSet(sets, type = 'weight') {
   let best = null;
-  const better = {
-    weight: (a, b) => (a.weight || 0) > (b.weight || 0) || ((a.weight || 0) === (b.weight || 0) && (a.reps || 0) > (b.reps || 0)),
-    distance: (a, b) => (a.distance || 0) > (b.distance || 0),
-    time: (a, b) => (a.seconds || 0) > (b.seconds || 0),
-  }[type];
   for (const s of sets) {
-    const empty = type === 'weight' ? s.weight === null && s.reps === null : type === 'distance' ? s.distance === null : s.seconds === null;
-    if (empty) continue;
-    if (!best || better(s, best)) best = s;
+    if (type === 'distance') {
+      if (s.distance === null || s.distance === undefined) continue;
+      if (!best || s.distance > best.distance) best = s;
+    } else if (type === 'weight') {
+      if (s.weight === null && s.reps === null) continue;
+      const w = s.weight || 0, bw = best ? best.weight || 0 : 0;
+      if (!best || w > bw || (w === bw && (s.reps || 0) > (best.reps || 0))) best = s;
+    }
   }
   return best;
 }
@@ -462,31 +405,20 @@ function exerciseHistory(log, name, type = 'weight') {
   const out = [];
   for (let i = log.length - 1; i >= 0; i--) {
     const ex = log[i].exercises.find((x) => x.name === name && typeOf(x) === type);
-    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, type, unit: ex.unit, sets: ex.sets });
+    if (ex) out.push({ id: log[i].id, week: log[i].week, dayName: log[i].dayName, listed: log[i].listed, type, unit: ex.unit, sets: ex.sets });
   }
   return out;
 }
 
-/** "60×8" (weights), "1.2 mi" (distance), "1:30" (time). */
+/** "60×8" (weights) or "1.2 mi" (distance). */
 function formatSet(s, type = 'weight', unit = '') {
-  if (type === 'distance') return s.distance === null ? '—' : `${round2(s.distance)}${unit ? ' ' + unit : ''}`;
-  if (type === 'time') return s.seconds === null ? '—' : formatDuration(s.seconds);
+  if (type === 'distance') return s.distance === null || s.distance === undefined ? '—' : `${round2(s.distance)}${unit ? ' ' + unit : ''}`;
+  if (type !== 'weight') return '—';
   if (s.weight === null || s.weight === 0) return s.reps === null ? '—' : `${s.reps}`;
   return `${s.weight}×${s.reps === null ? '?' : s.reps}`;
 }
 
-/** The target as written in the schedule, e.g. "3 × 8 · 60 kg", "0.5 mi", "3 × 0:45". */
-function formatTarget(t, unit, type = 'weight') {
-  if (type === 'distance' || type === 'time') {
-    const each = type === 'distance' ? (t.distance === null ? 'any distance' : `${t.distance} ${unit}`) : t.seconds === null ? 'any time' : formatDuration(t.seconds);
-    return t.sets > 1 ? `${t.sets} × ${each}` : each;
-  }
-  let out = `${t.sets} ×${t.reps === null ? ' ?' : ' ' + t.reps}`;
-  if (t.weight !== null) out += ` · ${t.weight} ${unit}`;
-  return out;
-}
-
-return { ScheduleError, parseSchedule, TYPES, parseDuration, formatDuration, freshProgress, templateWeek, nextDayIndex, completeDay, typeOf, lastSetsFor, startSession, nextSet, finishSession, doneSetCount, entrySetCount, entryVolume, entryTotals, bestSet, exerciseSummaries, exerciseHistory, formatSet, formatTarget };
+return { RUN, STRENGTH_BLOCKS, STRENGTH_SETS, DAYS, freshState, roundMiles, nextRunTarget, upcomingRuns, nextDayIndex, skipDay, typeOf, lastSetsFor, strengthName, startSession, nextSet, doneSetCount, ranDistance, finishSession, entrySetCount, entryTotals, bestSet, exerciseSummaries, exerciseHistory, formatSet };
 })();
 
 // Marble illustrations as inline SVG strings.
@@ -540,91 +472,57 @@ const icons = {
 
 
 
-const STORAGE_KEY = 'sisyphus.v1';
+const STORAGE_KEY = 'sisyphus.v2';
+const OLD_KEY = 'sisyphus.v1';
 
 // ---- Persistence ------------------------------------------------------------
 
 function load() {
-  const empty = { schedule: null, scheduleSource: null, progress: core.freshProgress(), active: null, log: [] };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return empty;
-    const d = JSON.parse(raw);
-    const out = {
-      schedule: d.schedule || null,
-      scheduleSource: typeof d.scheduleSource === 'string' ? d.scheduleSource : null,
-      progress: d.progress || core.freshProgress(),
-      active: d.active || null,
-      log: Array.isArray(d.log) ? d.log : [],
-    };
-    // Re-read the imported file so fixes and new features in the parser
-    // apply to schedules imported with an older version of the app.
-    if (out.scheduleSource) {
-      try { out.schedule = core.parseSchedule(out.scheduleSource); } catch { /* keep the saved copy */ }
+    if (raw) {
+      const d = JSON.parse(raw);
+      return {
+        ...core.freshState(),
+        week: d.week || 1,
+        completed: Array.isArray(d.completed) ? d.completed : [],
+        runTarget: typeof d.runTarget === 'number' && d.runTarget > 0 ? d.runTarget : core.RUN.start,
+        active: d.active || null,
+        log: Array.isArray(d.log) ? d.log : [],
+      };
     }
-    if (out.schedule && out.active) out.active = repairSession(out.schedule, out.active, out.log);
-    return out;
+    // Moving from the schedule-import version: keep the log, start the plan fresh.
+    const old = JSON.parse(localStorage.getItem(OLD_KEY) || 'null');
+    return { ...core.freshState(), log: old && Array.isArray(old.log) ? old.log : [] };
   } catch {
-    return empty;
+    return core.freshState();
   }
-}
-
-/** A workout started under an older version may have the wrong exercise type; rebuild those exercises. */
-function repairSession(schedule, active, log) {
-  try {
-    const fresh = core.startSession(schedule, { week: active.week, completed: [] }, active.dayIndex, log);
-    active.exercises = active.exercises.map((ex, i) => {
-      const f = fresh.exercises[i];
-      return f && f.name === ex.name && core.typeOf(ex) !== f.type ? f : ex;
-    });
-  } catch { /* leave it as it was */ }
-  return active;
 }
 
 function save() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     toast('Could not save on this device.');
   }
 }
 
-let data = load();
+let state = load();
+save();
 const ui = { tab: 'workout', logView: 'sessions', exercise: null, openEntry: null, toast: null };
 
 // ---- Helpers ----------------------------------------------------------------
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const bestLabel = (set, type, unit) => (set ? ` · best ${esc(core.formatSet(set, type, unit))}${type === 'weight' && set.weight ? ' ' + esc(unit) : ''}` : '');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const miles = (n) => `${core.roundMiles(n)} ${core.RUN.unit}`;
+const bestLabel = (set, type, unit) => (set ? ` · best ${esc(core.formatSet(set, type, unit))}${type === 'weight' && set.weight ? ' ' + esc(unit) : ''}` : '');
+
 let toastTimer;
 function toast(msg) {
   ui.toast = msg;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { ui.toast = null; render(); }, 2600);
-}
-
-function setSchedule(schedule, label, source = null) {
-  data.schedule = schedule;
-  data.scheduleSource = source;
-  data.progress = core.freshProgress();
-  data.active = null;
-  save();
-  ui.tab = 'workout';
-  toast(`${label} loaded.`);
-  render();
-}
-
-function importText(text) {
-  let schedule;
-  try {
-    schedule = core.parseSchedule(text);
-  } catch (e) {
-    alert(e instanceof core.ScheduleError ? `Could not import the schedule.\n\n${e.message}` : String(e));
-    return;
-  }
-  if (data.schedule && !confirm(`Replace "${data.schedule.name}" with "${schedule.name}"?\n\nYou will start again at week 1. Your log is kept.`)) return;
-  setSchedule(schedule, `"${schedule.name}"`, text);
+  toastTimer = setTimeout(() => { ui.toast = null; render(); }, 3000);
 }
 
 function download(filename, obj) {
@@ -641,82 +539,39 @@ function download(filename, obj) {
 
 // ---- Views ------------------------------------------------------------------
 
-const importButton = (label, cls = 'btn') =>
-  `<label class="${cls} file-btn">${label}<input type="file" accept=".json,application/json" data-action="import-file" hidden></label>`;
-
-function viewWelcome() {
-  return `
-  <section class="welcome">
-    ${bust(120)}
-    <h1 class="display">Sisyphus</h1>
-    <p class="muted">A workout tracker that follows a fixed weekly schedule. Import your schedule as a JSON file to begin.</p>
-    <div class="stack">
-      ${importButton('Import schedule', 'btn primary wide')}
-      <button class="btn wide" data-action="load-sample">Try the sample schedule</button>
-    </div>
-    <details class="format">
-      <summary>Schedule format</summary>
-      ${formatHelp()}
-    </details>
-  </section>`;
-}
-
-function formatHelp() {
-  return `<p class="muted small">Each week lists its days, and each day lists its exercises. With several weeks they run in order and then repeat. <code>weight</code> and <code>notes</code> are optional, and <code>reps</code> can be text like "8-10". For runs or holds, give an exercise <code>"type": "distance"</code> with a <code>distance</code>, or <code>"type": "time"</code> with <code>seconds</code>.</p>
-<pre>{
-  "name": "My plan",
-  "unit": "kg",
-  "weeks": [
-    { "days": [
-      { "name": "Push",
-        "exercises": [
-          { "name": "Bench press",
-            "sets": 3, "reps": 8,
-            "weight": 60 }
-        ] }
-    ] }
-  ]
-}</pre>`;
-}
-
-function weekHeader() {
-  const s = data.schedule;
-  const week = core.templateWeek(s, data.progress.week);
-  const sub = s.weeks.length > 1 ? `${esc(week.name)} · ${esc(s.name)}` : esc(s.name);
-  return { week, sub };
+function dayPreview(day, i) {
+  if (day.kind === 'run') {
+    // Runs still to do this week get the next distances in order.
+    const pending = core.DAYS.map((d, j) => j).filter((j) => core.DAYS[j].kind === 'run' && !state.completed.includes(j));
+    return `Run ${miles(core.upcomingRuns(state.runTarget, pending.length)[pending.indexOf(i)])}`;
+  }
+  return core.STRENGTH_BLOCKS.map((b) => `${b.name}: ${b.exercises.length} exercises`).join(' · ');
 }
 
 function viewWeek() {
-  const s = data.schedule;
-  const { week, sub } = weekHeader();
-  const next = core.nextDayIndex(s, data.progress);
-  const done = data.progress.completed.length;
-  const days = week.days
-    .map((day, i) => {
-      const isDone = data.progress.completed.includes(i);
-      const isNext = i === next;
-      const status = isDone ? '<span class="pill done">Done</span>' : isNext ? '<span class="pill next">Up next</span>' : '';
-      const list = day.exercises.map((e) => esc(e.name)).join(' · ');
-      return `
+  const next = core.nextDayIndex(state);
+  const days = core.DAYS.map((day, i) => {
+    const isDone = state.completed.includes(i);
+    const isNext = i === next;
+    const status = isDone ? '<span class="pill done">Done</span>' : isNext ? '<span class="pill next">Up next</span>' : '';
+    return `
       <article class="card day ${isNext ? 'is-next' : ''} ${isDone ? 'is-done' : ''}">
         <div class="row between">
           <h3>${esc(day.name)}</h3>
           ${status}
         </div>
-        <p class="muted small">${list}</p>
+        <p class="muted small">${isDone ? 'Done this week' : esc(dayPreview(day, i))}</p>
         ${isDone ? '' : `<div class="row gap">
           <button class="btn ${isNext ? 'primary' : ''}" data-action="start-day" data-day="${i}">Start</button>
           <button class="btn text" data-action="skip-day" data-day="${i}">Skip</button>
         </div>`}
       </article>`;
-    })
-    .join('');
+  }).join('');
   return `
   <header class="head">
     <div>
-      <p class="eyebrow">${sub}</p>
-      <h1 class="display">Week ${data.progress.week}</h1>
-      <p class="muted">${done} of ${week.days.length} days done</p>
+      <p class="eyebrow">${plural(state.completed.length, 'day')} of ${core.DAYS.length} done</p>
+      <h1 class="display">Week ${state.week}</h1>
     </div>
     ${bust(70)}
   </header>
@@ -724,51 +579,50 @@ function viewWeek() {
 }
 
 function viewSession() {
-  const a = data.active;
-  const s = data.schedule;
-  const total = core.templateWeek(s, a.week).days.length;
-  const exercises = a.exercises
-    .map((ex, ei) => {
-      const type = core.typeOf(ex);
-      const field = (name, si, label, mode, placeholder = '—') =>
-        `<input aria-label="${esc(ex.name)} set ${si + 1} ${label}" inputmode="${mode}" data-field="${name}" data-ex="${ei}" data-set="${si}" value="${esc(ex.sets[si][name] ?? '')}" placeholder="${placeholder}">`;
-      const rows = ex.sets
-        .map((set, si) => {
-          const inputs =
-            type === 'distance' ? field('distance', si, `distance (${ex.unit})`, 'decimal')
-            : type === 'time' ? field('time', si, 'time (minutes:seconds)', 'text', 'm:ss')
-            : `${field('weight', si, `weight (${ex.unit})`, 'decimal')}<span class="muted">×</span>${field('reps', si, 'reps', 'numeric')}`;
-          return `
-        <div class="set ${type === 'weight' ? '' : 'single'} ${set.done ? 'is-done' : ''}">
+  const a = state.active;
+  let lastBlock = null;
+  const exercises = a.exercises.map((ex, ei) => {
+    const type = core.typeOf(ex);
+    const field = (name, si, label, mode) =>
+      `<input aria-label="${esc(ex.name)} set ${si + 1} ${label}" inputmode="${mode}" data-field="${name}" data-ex="${ei}" data-set="${si}" value="${esc(ex.sets[si][name] ?? '')}" placeholder="—">`;
+    const rows = ex.sets.map((set, si) => {
+      const inputs = type === 'distance'
+        ? field('distance', si, `distance (${ex.unit})`, 'decimal')
+        : `${field('weight', si, `weight (${ex.unit})`, 'decimal')}<span class="muted">×</span>${field('reps', si, 'reps', 'numeric')}`;
+      return `
+        <div class="set ${type === 'distance' ? 'single' : ''} ${set.done ? 'is-done' : ''}">
           <span class="set-n">${si + 1}</span>
           ${inputs}
           <button class="check" aria-label="Set ${si + 1} done" aria-pressed="${set.done}" data-action="toggle-set" data-ex="${ei}" data-set="${si}">${set.done ? icons.check : ''}</button>
         </div>`;
-        })
-        .join('');
-      const head =
-        type === 'weight'
-          ? `<div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>`
-          : `<div class="set single head-row"><span></span><span class="small muted">${type === 'distance' ? esc(ex.unit) : 'Time'}</span><span></span></div>`;
-      const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map((x) => core.formatSet(x, type, ex.unit)).join(' · ')}</p>` : '';
-      const notes = ex.notes ? `<p class="muted small">${esc(ex.notes)}</p>` : '';
-      return `
+    }).join('');
+    const head = type === 'distance'
+      ? `<div class="set single head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span></div>`
+      : `<div class="set head-row"><span></span><span class="small muted">${esc(ex.unit)}</span><span></span><span class="small muted">Reps</span><span></span></div>`;
+    const target = type === 'distance' ? `Listed ${miles(ex.target.distance)}` : `${ex.target.sets} sets`;
+    const last = ex.last ? `<p class="muted small">Last time: ${ex.last.map((x) => core.formatSet(x, type, ex.unit)).join(' · ')}</p>` : '';
+    const blockHead = ex.block && ex.block !== lastBlock ? `<h2 class="block-head">${esc(ex.block)}</h2>` : '';
+    lastBlock = ex.block || lastBlock;
+    return `
+      ${blockHead}
       <article class="card">
         <div class="row between">
           <h3>${esc(ex.name)}</h3>
-          <span class="muted small">${esc(core.formatTarget(ex.target, ex.unit, type))}</span>
+          <span class="muted small">${esc(target)}</span>
         </div>
-        ${notes}${last}
+        ${last}
         ${head}
         ${rows}
-        <button class="btn text small" data-action="add-set" data-ex="${ei}">+ Add set</button>
+        ${type === 'distance' ? '' : `<button class="btn text small" data-action="add-set" data-ex="${ei}">+ Add set</button>`}
       </article>`;
-    })
-    .join('');
+  }).join('');
+  const hint = a.kind === 'run'
+    ? `<p class="muted small hint">Change the distance if you ran a different amount, then tick it off. Running further than listed raises your next runs.</p>`
+    : '';
   return `
   <header class="head">
     <div>
-      <p class="eyebrow">Week ${a.week} · Day ${a.dayIndex + 1} of ${total}</p>
+      <p class="eyebrow">Week ${a.week}</p>
       <h1 class="display">${esc(a.dayName)}</h1>
       <p class="muted">${plural(core.doneSetCount(a), 'set')} done</p>
     </div>
@@ -777,69 +631,61 @@ function viewSession() {
       <button class="btn text small" data-action="discard">Discard</button>
     </div>
   </header>
+  ${hint}
   <div class="stack">${exercises}</div>`;
 }
 
 function viewLog() {
+  const header = `
+  <header class="head">
+    <div>
+      <p class="eyebrow">${plural(state.log.length, 'session')} logged</p>
+      <h1 class="display">Log</h1>
+    </div>
+    ${column(48)}
+  </header>`;
+  if (!state.log.length) return `${header}<p class="muted empty">Finished workouts show up here.</p>`;
+  if (ui.exercise) return viewExercise();
   const tabs = `
   <div class="segmented" role="group" aria-label="Log view">
     <button aria-pressed="${ui.logView === 'sessions'}" data-action="log-view" data-view="sessions">Sessions</button>
     <button aria-pressed="${ui.logView === 'exercises'}" data-action="log-view" data-view="exercises">Exercises</button>
   </div>`;
-  const header = `
-  <header class="head">
-    <div>
-      <p class="eyebrow">${plural(data.log.length, 'session')} logged</p>
-      <h1 class="display">Log</h1>
-    </div>
-    ${column(48)}
-  </header>`;
-  if (!data.log.length) return `${header}<p class="muted empty">Finished workouts show up here.</p>`;
-  if (ui.exercise) return viewExercise();
   return header + tabs + (ui.logView === 'sessions' ? viewSessions() : viewExercises());
 }
 
 function viewSessions() {
-  return `<div class="card list">${[...data.log]
-    .reverse()
-    .map((e) => {
-      const open = ui.openEntry === e.id;
-      const totals = core.entryTotals(e).map((t) => ` · ${esc(t)}`).join('');
-      const detail = open
-        ? `<div class="detail">${e.exercises
-            .map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map((x) => core.formatSet(x, core.typeOf(ex), ex.unit)).join(' · ')}</span></div>`)
-            .join('')}</div>`
-        : '';
-      return `
+  return `<div class="card list">${[...state.log].reverse().map((e) => {
+    const open = ui.openEntry === e.id;
+    const totals = core.entryTotals(e).map((t) => ` · ${esc(t)}`).join('');
+    const listed = e.listed ? `<div class="row between small"><span class="muted">Listed</span><span class="muted">${esc(miles(e.listed))}</span></div>` : '';
+    const detail = open
+      ? `<div class="detail">${listed}${e.exercises.map((ex) => `<div class="row between small"><span>${esc(ex.name)}</span><span class="muted">${ex.sets.map((x) => core.formatSet(x, core.typeOf(ex), ex.unit)).join(' · ')}</span></div>`).join('')}</div>`
+      : '';
+    return `
       <div class="item">
         <button class="item-btn" aria-expanded="${open}" data-action="toggle-entry" data-id="${esc(e.id)}">
-          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(e.exercises.length, 'exercise')} · ${plural(core.entrySetCount(e), 'set')}${totals}</span></span>
+          <span><strong>Week ${e.week} · ${esc(e.dayName)}</strong><br><span class="muted small">${plural(core.entrySetCount(e), 'set')}${totals}</span></span>
           <span class="chev ${open ? 'open' : ''}">${icons.chevron}</span>
         </button>
         ${detail}
       </div>`;
-    })
-    .join('')}</div>`;
+  }).join('')}</div>`;
 }
 
 function viewExercises() {
-  return `<div class="card list">${core
-    .exerciseSummaries(data.log)
-    .map(
-      (x) => `
+  return `<div class="card list">${core.exerciseSummaries(state.log).map((x) => `
     <div class="item">
       <button class="item-btn" data-action="open-exercise" data-name="${esc(x.name)}" data-type="${x.type}">
         <span><strong>${esc(x.name)}</strong><br><span class="muted small">${plural(x.sessions, 'session')}${bestLabel(x.best, x.type, x.unit)}</span></span>
         <span class="chev">${icons.chevron}</span>
       </button>
-    </div>`
-    )
-    .join('')}</div>`;
+    </div>`).join('')}</div>`;
 }
 
 function viewExercise() {
   const { name, type } = ui.exercise;
-  const hist = core.exerciseHistory(data.log, name, type);
+  const hist = core.exerciseHistory(state.log, name, type);
   const best = core.bestSet(hist.flatMap((h) => h.sets), type);
   const unit = hist[0] ? hist[0].unit : '';
   return `
@@ -850,70 +696,61 @@ function viewExercise() {
       <h1 class="display">${esc(name)}</h1>
     </div>
   </header>
-  <div class="card list">${hist
-    .map(
-      (h) => `
+  <div class="card list">${hist.map((h) => `
     <div class="item static">
-      <div class="row between"><strong>Week ${h.week} · ${esc(h.dayName)}</strong></div>
+      <div class="row between"><strong>Week ${h.week} · ${esc(h.dayName)}</strong>${h.listed ? `<span class="muted small">listed ${esc(miles(h.listed))}</span>` : ''}</div>
       <div class="muted small">${h.sets.map((x) => core.formatSet(x, type, h.unit)).join(' · ')}</div>
-    </div>`
-    )
-    .join('')}</div>`;
+    </div>`).join('')}</div>`;
 }
 
-function viewSchedule() {
-  const s = data.schedule;
-  const weeks = s.weeks
-    .map(
-      (w, wi) => `
-    <details class="card" ${wi === (data.progress.week - 1) % s.weeks.length ? 'open' : ''}>
-      <summary><h3>${esc(w.name)}</h3><span class="muted small">${w.days.length} days</span></summary>
-      ${w.days
-        .map(
-          (d) => `
-        <div class="sched-day">
-          <p class="label">${esc(d.name)}</p>
-          ${d.exercises.map((e) => `<div class="row between small"><span>${esc(e.name)}</span><span class="muted">${esc(core.formatTarget(e, e.unit, core.typeOf(e)))}</span></div>`).join('')}
-        </div>`
-        )
-        .join('')}
-    </details>`
-    )
-    .join('');
+function viewPlan() {
+  const upcoming = core.upcomingRuns(state.runTarget, 6);
   return `
   <header class="head">
     <div>
-      <p class="eyebrow">${s.weeks.length} ${s.weeks.length === 1 ? 'week, repeating' : 'weeks, then repeats'}</p>
-      <h1 class="display">${esc(s.name)}</h1>
+      <p class="eyebrow">Every week</p>
+      <h1 class="display">Plan</h1>
     </div>
   </header>
-  <div class="stack">${weeks}</div>
+  <div class="stack">
+    <section class="card">
+      <div class="row between"><h3>Running</h3><span class="muted small">2 runs a week</span></div>
+      <p class="muted small">Each run is 10% longer than the one before. Run further than listed and the next run starts a third of the way from the listed distance to what you ran, plus 10%.</p>
+      <div class="upcoming">
+        ${upcoming.map((d, i) => i === 0
+          ? `<div class="row between small"><strong>Next run</strong><strong>${esc(miles(d))}</strong></div>`
+          : `<div class="row between small muted"><span>Then</span><span>${esc(miles(d))}</span></div>`).join('')}
+      </div>
+    </section>
+    <section class="card">
+      <div class="row between"><h3>Strength</h3><span class="muted small">1 day a week</span></div>
+      ${core.STRENGTH_BLOCKS.map((b) => `
+        <div class="sched-day">
+          <p class="label">${esc(b.name)}</p>
+          ${b.exercises.map((id) => `<div class="row between small"><span>${esc(id)}</span><span class="muted">TBD · ${core.STRENGTH_SETS} sets</span></div>`).join('')}
+        </div>`).join('')}
+    </section>
+  </div>
   <div class="stack actions">
-    ${importButton('Import a new schedule', 'btn wide')}
     <button class="btn wide" data-action="export">Export my data</button>
     <div class="row between">
       <button class="btn text danger" data-action="reset">Erase everything</button>
       <span class="build muted small">Build ${esc(BUILD)}</span>
     </div>
-  </div>
-  <details class="format"><summary>Schedule format</summary>${formatHelp()}</details>`;
+  </div>`;
 }
 
 function nav() {
-  const item = (id, label) =>
-    `<button class="tab" data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}>${icons[id]}<span>${label}</span></button>`;
-  return `<nav class="tabs" aria-label="Main">${item('workout', 'Workout')}${item('log', 'Log')}${item('schedule', 'Schedule')}</nav>`;
+  const item = (id, label, icon) =>
+    `<button class="tab" data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}>${icons[icon]}<span>${label}</span></button>`;
+  return `<nav class="tabs" aria-label="Main">${item('workout', 'Workout', 'workout')}${item('log', 'Log', 'log')}${item('plan', 'Plan', 'schedule')}</nav>`;
 }
 
 function render() {
   const app = document.getElementById('app');
-  let body;
-  if (!data.schedule) body = viewWelcome();
-  else if (ui.tab === 'log') body = viewLog();
-  else if (ui.tab === 'schedule') body = viewSchedule();
-  else body = data.active ? viewSession() : viewWeek();
+  const body = ui.tab === 'log' ? viewLog() : ui.tab === 'plan' ? viewPlan() : state.active ? viewSession() : viewWeek();
   const scrollY = window.scrollY;
-  app.innerHTML = `<main class="page">${body}</main>${data.schedule ? nav() : ''}${ui.toast ? `<div class="toast" role="status">${esc(ui.toast)}</div>` : ''}`;
+  app.innerHTML = `<main class="page">${body}</main>${nav()}${ui.toast ? `<div class="toast" role="status">${esc(ui.toast)}</div>` : ''}`;
   window.scrollTo(0, scrollY);
 }
 
@@ -921,89 +758,74 @@ function render() {
 
 const actions = {
   tab: (el) => { ui.tab = el.dataset.tab; ui.exercise = null; window.scrollTo(0, 0); },
-  'load-sample': async () => {
-    try {
-      // The standalone build inlines the sample, since fetch() fails on file:// pages.
-      const text = typeof SAMPLE_SCHEDULE === 'string' ? SAMPLE_SCHEDULE : await (await fetch('./sample-schedule.json')).text();
-      setSchedule(core.parseSchedule(text), 'Sample schedule', text);
-    } catch (e) {
-      alert('Could not load the sample schedule: ' + e.message);
-    }
-  },
   'start-day': (el) => {
-    data.active = core.startSession(data.schedule, data.progress, Number(el.dataset.day), data.log);
+    state.active = core.startSession(state, Number(el.dataset.day));
     save();
     window.scrollTo(0, 0);
   },
   'skip-day': (el) => {
-    const day = core.templateWeek(data.schedule, data.progress.week).days[Number(el.dataset.day)];
-    if (!confirm(`Skip ${day.name} this week?`)) return;
-    data.progress = core.completeDay(data.schedule, data.progress, Number(el.dataset.day));
+    const day = core.DAYS[Number(el.dataset.day)];
+    const note = day.kind === 'run' ? ' Your next run stays the same distance.' : '';
+    if (!confirm(`Skip ${day.name} this week?${note}`)) return;
+    state = core.skipDay(state, Number(el.dataset.day));
     save();
   },
   'toggle-set': (el) => {
-    const set = data.active.exercises[el.dataset.ex].sets[el.dataset.set];
+    const set = state.active.exercises[el.dataset.ex].sets[el.dataset.set];
     set.done = !set.done;
     save();
   },
   'add-set': (el) => {
-    const ex = data.active.exercises[el.dataset.ex];
+    const ex = state.active.exercises[el.dataset.ex];
     ex.sets.push(core.nextSet(ex));
     save();
   },
   finish: () => {
-    const a = data.active;
-    const n = core.doneSetCount(a);
-    if (n === 0 && !confirm('No sets are checked off. Finish anyway? Nothing will be logged, but the day counts as done.')) return;
-    if (n > 0) data.log.push(core.finishSession(a));
-    const wasWeek = data.progress.week;
-    data.progress = core.completeDay(data.schedule, data.progress, a.dayIndex);
-    data.active = null;
+    const a = state.active;
+    if (core.doneSetCount(a) === 0) {
+      const note = a.kind === 'run' ? ' Nothing will be logged and your next run stays the same distance.' : ' Nothing will be logged.';
+      if (!confirm(`Nothing is ticked off. Finish anyway?${note}`)) return;
+    }
+    const wasWeek = state.week;
+    state = core.finishSession(state);
     save();
-    toast(data.progress.week > wasWeek ? `Week ${wasWeek} complete. On to week ${data.progress.week}.` : `${a.dayName} logged.`);
+    const runNote = a.kind === 'run' ? ` Next run: ${miles(state.runTarget)}.` : '';
+    toast(state.week > wasWeek ? `Week ${wasWeek} complete.${runNote}` : `${a.dayName} logged.${runNote}`);
     window.scrollTo(0, 0);
   },
   discard: () => {
     if (!confirm('Discard this workout? Nothing will be logged.')) return;
-    data.active = null;
+    state.active = null;
     save();
   },
   'log-view': (el) => { ui.logView = el.dataset.view; },
   'toggle-entry': (el) => { ui.openEntry = ui.openEntry === el.dataset.id ? null : el.dataset.id; },
   'open-exercise': (el) => { ui.exercise = { name: el.dataset.name, type: el.dataset.type || 'weight' }; window.scrollTo(0, 0); },
   'close-exercise': () => { ui.exercise = null; ui.logView = 'exercises'; },
-  export: () => download('sisyphus-data.json', { exportedAt: new Date().toISOString(), ...data }),
+  export: () => download('sisyphus-data.json', { exportedAt: new Date().toISOString(), build: BUILD, ...state }),
   reset: () => {
-    if (!confirm('Erase the schedule, your progress and the whole log from this device?')) return;
+    if (!confirm('Erase your progress and the whole log from this device?')) return;
     if (!confirm('This cannot be undone. Erase everything?')) return;
-    data = { schedule: null, scheduleSource: null, progress: core.freshProgress(), active: null, log: [] };
+    state = core.freshState();
+    try { localStorage.removeItem(OLD_KEY); } catch { /* ignore */ }
     save();
     ui.tab = 'workout';
   },
 };
 
-document.addEventListener('click', async (e) => {
+document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'INPUT') return;
   const fn = actions[el.dataset.action];
   if (!fn) return;
-  await fn(el);
+  fn(el);
   render();
-});
-
-document.addEventListener('change', (e) => {
-  const el = e.target;
-  if (el.dataset.action !== 'import-file' || !el.files[0]) return;
-  const file = el.files[0];
-  el.value = '';
-  file.text().then(importText);
 });
 
 document.addEventListener('input', (e) => {
   const el = e.target;
-  if (!el.dataset.field || !data.active) return;
-  const field = el.dataset.field;
-  data.active.exercises[el.dataset.ex].sets[el.dataset.set][field] = field === 'time' ? el.value : el.value.replace(',', '.');
+  if (!el.dataset.field || !state.active) return;
+  state.active.exercises[el.dataset.ex].sets[el.dataset.set][el.dataset.field] = el.value.replace(',', '.');
   save();
 });
 
